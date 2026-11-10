@@ -8,15 +8,42 @@ Module thực hiện các thuật toán hậu xử lý hình thái học nhị p
    - Loại bỏ các ổ nhiễu có diện tích nhỏ hơn ngưỡng `min_area`.
    - Đếm chính xác số lượng ổ bệnh độc lập trên bề mặt lá.
    - Trích xuất hộp bao chữ nhật Bounding Box (x, y, w, h, area) cho từng ổ bệnh.
+5. Tiện ích vẽ Bounding Box và đánh số thứ tự ổ bệnh trực tiếp lên ảnh RGB bằng mảng NumPy.
 
 QUY TẮC BẮT BUỘC (CODE FROM SCRATCH):
 - TUYỆT ĐỐI KHÔNG sử dụng `cv2.erode`, `cv2.dilate`, `cv2.morphologyEx`, `cv2.connectedComponentsWithStats`.
+- Sử dụng `np.pad` kết hợp `np.lib.stride_tricks.sliding_window_view` cho các phép hình thái học.
 - Cài đặt thuật toán BFS hàng đợi (Queue) thuần Python kết hợp mảng kiểm tra đã thăm (visited array) NumPy.
 """
 
 from collections import deque
 from typing import Any, Dict, List, Tuple
 import numpy as np
+
+
+# Bảng phông chữ bitmap 5x7 tối giản (chỉ bằng NumPy) để vẽ chỉ số ổ bệnh #1, #2...
+_DIGIT_FONT_5X7: Dict[str, Tuple[str, ...]] = {
+    "0": ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
+    "1": ("00100", "01100", "00100", "00100", "00100", "00100", "01110"),
+    "2": ("01110", "10001", "00001", "00110", "01000", "10000", "11111"),
+    "3": ("11110", "00001", "00001", "01110", "00001", "00001", "11110"),
+    "4": ("00010", "00110", "01010", "10010", "11111", "00010", "00010"),
+    "5": ("11111", "10000", "11110", "00001", "00001", "10001", "01110"),
+    "6": ("00110", "01000", "10000", "11110", "10001", "10001", "01110"),
+    "7": ("11111", "00001", "00010", "00100", "01000", "01000", "01000"),
+    "8": ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
+    "9": ("01110", "10001", "10001", "01111", "00001", "00010", "01100"),
+    "#": ("01010", "01010", "11111", "01010", "11111", "01010", "01010"),
+}
+
+
+def _validate_binary_mask_and_kernel(mask: np.ndarray, kernel_size: int) -> np.ndarray:
+    """Kiểm tra tính hợp lệ của mặt nạ 2D và kích thước kernel, chuẩn hóa về {0, 255} uint8."""
+    if not isinstance(mask, np.ndarray) or mask.ndim != 2:
+        raise ValueError(f"Mặt nạ đầu vào phải là mảng NumPy 2 chiều (H, W), nhận được: {getattr(mask, 'shape', type(mask))}.")
+    if not isinstance(kernel_size, (int, np.integer)) or kernel_size < 1 or kernel_size % 2 == 0:
+        raise ValueError(f"Kích thước kernel phải là số nguyên dương lẻ (>= 1), nhận được: {kernel_size}.")
+    return np.where(mask > 0, 255, 0).astype(np.uint8)
 
 
 def erode_scratch(
@@ -38,19 +65,16 @@ def erode_scratch(
 
     Raises:
         ValueError: Nếu `mask` không phải 2 chiều hoặc `kernel_size` không phải số lẻ.
-        NotImplementedError: Khi hàm chưa được hiện thực hoàn chỉnh trên nhánh tính năng.
     """
-    # =========================================================================
-    # HƯỚNG DẪN TRIỂN KHAI CHO THÀNH VIÊN:
-    # -------------------------------------------------------------------------
-    # Bước 1: Kiểm tra kernel_size là số lẻ. Bán kính r = kernel_size // 2.
-    # Bước 2: Đệm biên ma trận `mask` bằng 0 với độ rộng r (np.pad(mask, r, mode='constant', constant_values=0)).
-    # Bước 3: Khởi tạo mảng kết quả `out = np.zeros_like(mask)`.
-    # Bước 4: Vectorized sliding window hoặc duyệt qua các bước dịch:
-    #         Một điểm giữ 255 nếu giá trị cực tiểu trong cửa sổ bằng 255.
-    # Bước 5: Trả về out với dtype=np.uint8.
-    # =========================================================================
-    raise NotImplementedError("Hàm erode_scratch cần được cài đặt trong nhánh feat/postprocess.")
+    bin_mask = _validate_binary_mask_and_kernel(mask, kernel_size)
+    if kernel_size == 1:
+        return bin_mask
+
+    pad_w = kernel_size // 2
+    padded = np.pad(bin_mask, pad_width=pad_w, mode="constant", constant_values=0)
+    windows = np.lib.stride_tricks.sliding_window_view(padded, (kernel_size, kernel_size))
+    eroded = np.min(windows, axis=(2, 3))
+    return eroded.astype(np.uint8)
 
 
 def dilate_scratch(
@@ -72,18 +96,16 @@ def dilate_scratch(
 
     Raises:
         ValueError: Nếu `mask` không phải 2 chiều hoặc `kernel_size` không hợp lệ.
-        NotImplementedError: Khi hàm chưa được hiện thực hoàn chỉnh trên nhánh tính năng.
     """
-    # =========================================================================
-    # HƯỚNG DẪN TRIỂN KHAI CHO THÀNH VIÊN:
-    # -------------------------------------------------------------------------
-    # Bước 1: Tính bán kính r = kernel_size // 2.
-    # Bước 2: Đệm biên mask với độ rộng r bằng giá trị 0.
-    # Bước 3: Khởi tạo kết quả out.
-    # Bước 4: Một điểm nhận 255 nếu giá trị cực đại trong cửa sổ lân cận bằng 255.
-    # Bước 5: Trả về out với dtype=np.uint8.
-    # =========================================================================
-    raise NotImplementedError("Hàm dilate_scratch cần được cài đặt trong nhánh feat/postprocess.")
+    bin_mask = _validate_binary_mask_and_kernel(mask, kernel_size)
+    if kernel_size == 1:
+        return bin_mask
+
+    pad_w = kernel_size // 2
+    padded = np.pad(bin_mask, pad_width=pad_w, mode="constant", constant_values=0)
+    windows = np.lib.stride_tricks.sliding_window_view(padded, (kernel_size, kernel_size))
+    dilated = np.max(windows, axis=(2, 3))
+    return dilated.astype(np.uint8)
 
 
 def opening_scratch(
@@ -102,14 +124,8 @@ def opening_scratch(
     Returns:
         np.ndarray: Mặt nạ sau phép mở, kích thước `(H, W)`, kiểu `np.uint8`.
     """
-    # =========================================================================
-    # HƯỚNG DẪN TRIỂN KHAI CHO THÀNH VIÊN:
-    # -------------------------------------------------------------------------
-    # Bước 1: Gọi eroded = erode_scratch(mask, kernel_size).
-    # Bước 2: Gọi opened = dilate_scratch(eroded, kernel_size).
-    # Bước 3: Trả về opened.
-    # =========================================================================
-    raise NotImplementedError("Hàm opening_scratch cần được cài đặt trong nhánh feat/postprocess.")
+    eroded = erode_scratch(mask, kernel_size=kernel_size)
+    return dilate_scratch(eroded, kernel_size=kernel_size)
 
 
 def closing_scratch(
@@ -128,14 +144,8 @@ def closing_scratch(
     Returns:
         np.ndarray: Mặt nạ sau phép đóng, kích thước `(H, W)`, kiểu `np.uint8`.
     """
-    # =========================================================================
-    # HƯỚNG DẪN TRIỂN KHAI CHO THÀNH VIÊN:
-    # -------------------------------------------------------------------------
-    # Bước 1: Gọi dilated = dilate_scratch(mask, kernel_size).
-    # Bước 2: Gọi closed = erode_scratch(dilated, kernel_size).
-    # Bước 3: Trả về closed.
-    # =========================================================================
-    raise NotImplementedError("Hàm closing_scratch cần được cài đặt trong nhánh feat/postprocess.")
+    dilated = dilate_scratch(mask, kernel_size=kernel_size)
+    return erode_scratch(dilated, kernel_size=kernel_size)
 
 
 def connected_components_bfs_scratch(
@@ -145,18 +155,10 @@ def connected_components_bfs_scratch(
     """Tìm các thành phần liên thông 8 hướng (8-connectivity) bằng BFS từ đầu, lọc nhiễu diện tích và xuất BBox.
 
     Thuật toán duyệt:
-    1. Khởi tạo mảng boolean `visited` kích thước `(H, W)` với giá trị `False`.
-    2. Quét tuần tự từng pixel (y, x):
-       - Nếu `mask[y, x] == 255` và `not visited[y, x]`:
-         Khởi tạo hàng đợi BFS `queue = deque([(y, x)])`, đánh dấu đã thăm.
-         Mở rộng tìm kiếm 8 láng giềng:
-         `[(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]`.
-         Ghi nhận tập hợp các điểm thuộc thành phần liên thông, tìm tọa độ cực trị `(min_x, min_y, max_x, max_y)`
-         và diện tích `area = len(points)`.
-    3. Kiểm tra điều kiện diện tích:
-       - Nếu `area >= min_area`: Giữ lại thành phần liên thông trên `cleaned_mask`,
-         tính hộp bao `(x, y, w, h, area)` với `x = min_x, y = min_y, w = max_x - min_x + 1, h = max_y - min_y + 1`.
-       - Nếu `area < min_area`: Bỏ qua (lọc nhiễu), các pixel này sẽ có giá trị 0 trên `cleaned_mask`.
+    1. Quét các điểm ảnh tiền cảnh (`mask > 0`) chưa được thăm.
+    2. Dùng hàng đợi BFS (`collections.deque`) mở rộng tìm kiếm 8 láng giềng `(-1..1, -1..1)`.
+    3. Chỉ giữ lại các thành phần liên thông có diện tích `area >= min_area`.
+    4. Sắp xếp danh sách các ổ bệnh theo diện tích giảm dần.
 
     Args:
         mask: Mặt nạ nhị phân 2 chiều kích thước `(H, W)`, kiểu `np.uint8`, giá trị `{0, 255}`.
@@ -167,31 +169,179 @@ def connected_components_bfs_scratch(
             - "cleaned_mask": np.ndarray kích thước `(H, W)`, kiểu `np.uint8`, chỉ nhận `{0, 255}`,
               chứa các vết bệnh đã được khử sạch nhiễu hạt nhỏ.
             - "num_lesions": int, số lượng ổ bệnh độc lập đếm được.
-            - "bboxes": List[Tuple[int, int, int, int, int]], danh sách các hộp bao của từng vết bệnh,
-              mỗi phần tử là tuple dạng `(x, y, w, h, area)`.
+            - "bboxes": List[Tuple[int, int, int, int, int]], danh sách các hộp bao của từng vết bệnh
+              được sắp xếp theo diện tích giảm dần, mỗi phần tử là tuple `(x, y, w, h, area)`.
 
     Raises:
-        ValueError: Nếu `mask` không phải mảng 2 chiều.
-        NotImplementedError: Khi hàm chưa được hiện thực hoàn chỉnh trên nhánh tính năng.
-
-    Note:
-        - QUY TẮC: Tuyệt đối không dùng `cv2.connectedComponentsWithStats` hay `scipy.ndimage.label`.
-        - Cần dùng `collections.deque` để thao tác hàng đợi BFS đạt độ phức tạp O(1) cho mỗi phép pop/append.
+        ValueError: Nếu `mask` không phải mảng 2 chiều hoặc `min_area < 1`.
     """
-    # =========================================================================
-    # HƯỚNG DẪN TRIỂN KHAI CHO THÀNH VIÊN:
-    # -------------------------------------------------------------------------
-    # Bước 1: Khởi tạo H, W = mask.shape.
-    # Bước 2: visited = np.zeros((H, W), dtype=bool).
-    # Bước 3: cleaned_mask = np.zeros((H, W), dtype=np.uint8).
-    # Bước 4: bboxes = []
-    # Bước 5: 8 hướng láng giềng: directions = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)].
-    # Bước 6: Duyệt qua các điểm (r, c). Khi gặp điểm trắng chưa thăm:
-    #         - Chạy BFS bằng deque để gom tất cả tọa độ liên thông.
-    #         - Nếu diện tích >= min_area:
-    #           Ghi nhận vào cleaned_mask, tính (min_x, min_y, w, h, area) và append vào bboxes.
-    # Bước 7: Trả về dict: {"cleaned_mask": cleaned_mask, "num_lesions": len(bboxes), "bboxes": bboxes}.
-    # =========================================================================
-    raise NotImplementedError(
-        "Hàm connected_components_bfs_scratch cần được cài đặt trong nhánh feat/postprocess."
-    )
+    if not isinstance(mask, np.ndarray) or mask.ndim != 2:
+        raise ValueError(f"Mặt nạ đầu vào phải là mảng 2 chiều (H, W), nhận được: {getattr(mask, 'shape', type(mask))}.")
+    if min_area < 1:
+        raise ValueError(f"min_area phải >= 1, nhận được: {min_area}.")
+
+    binary = mask > 0
+    H, W = binary.shape
+    visited = np.zeros((H, W), dtype=bool)
+    cleaned_mask = np.zeros((H, W), dtype=np.uint8)
+    bboxes: List[Tuple[int, int, int, int, int]] = []
+
+    directions = [
+        (-1, -1), (-1, 0), (-1, 1),
+        (0, -1),           (0, 1),
+        (1, -1),  (1, 0),  (1, 1),
+    ]
+
+    fg_rows, fg_cols = np.where(binary)
+    for start_r, start_c in zip(fg_rows.tolist(), fg_cols.tolist()):
+        if visited[start_r, start_c]:
+            continue
+
+        visited[start_r, start_c] = True
+        queue = deque([(start_r, start_c)])
+        comp_rows: List[int] = []
+        comp_cols: List[int] = []
+
+        min_r = max_r = start_r
+        min_c = max_c = start_c
+
+        while queue:
+            r, c = queue.popleft()
+            comp_rows.append(r)
+            comp_cols.append(c)
+
+            if r < min_r:
+                min_r = r
+            elif r > max_r:
+                max_r = r
+            if c < min_c:
+                min_c = c
+            elif c > max_c:
+                max_c = c
+
+            for dr, dc in directions:
+                nr = r + dr
+                nc = c + dc
+                if 0 <= nr < H and 0 <= nc < W and binary[nr, nc] and not visited[nr, nc]:
+                    visited[nr, nc] = True
+                    queue.append((nr, nc))
+
+        area = len(comp_rows)
+        if area >= min_area:
+            cleaned_mask[comp_rows, comp_cols] = 255
+            x = int(min_c)
+            y = int(min_r)
+            w = int(max_c - min_c + 1)
+            h = int(max_r - min_r + 1)
+            bboxes.append((x, y, w, h, int(area)))
+
+    # Sắp xếp danh sách các ổ bệnh theo diện tích giảm dần
+    bboxes.sort(key=lambda item: item[4], reverse=True)
+
+    return {
+        "cleaned_mask": cleaned_mask,
+        "num_lesions": int(len(bboxes)),
+        "bboxes": bboxes,
+    }
+
+
+def _draw_text_numpy(
+    canvas: np.ndarray,
+    text: str,
+    top_y: int,
+    left_x: int,
+    fg_color: Tuple[int, int, int] = (255, 255, 255),
+    bg_color: Tuple[int, int, int] = (220, 38, 38),
+    scale: int = 1,
+) -> None:
+    """Vẽ chuỗi ký tự số đơn giản (#1, #2, ...) trực tiếp bằng mảng NumPy (không dùng OpenCV)."""
+    H, W = canvas.shape[:2]
+    char_w = 5 * scale
+    char_h = 7 * scale
+    pad = 2 * scale
+    total_w = len(text) * (char_w + scale) - scale + 2 * pad
+    total_h = char_h + 2 * pad
+
+    y0 = max(0, top_y)
+    x0 = max(0, left_x)
+    y1 = min(H, y0 + total_h)
+    x1 = min(W, x0 + total_w)
+
+    if y1 <= y0 or x1 <= x0:
+        return
+
+    # Vẽ nền nhãn nhỏ gọn
+    canvas[y0:y1, x0:x1] = bg_color
+
+    cursor_x = x0 + pad
+    cursor_y = y0 + pad
+    for ch in text:
+        glyph = _DIGIT_FONT_5X7.get(ch)
+        if glyph is not None:
+            for gy, row_bits in enumerate(glyph):
+                for gx, bit in enumerate(row_bits):
+                    if bit == "1":
+                        py0 = cursor_y + gy * scale
+                        px0 = cursor_x + gx * scale
+                        py1 = min(H, py0 + scale)
+                        px1 = min(W, px0 + scale)
+                        if py0 < H and px0 < W and py1 > py0 and px1 > px0:
+                            canvas[py0:py1, px0:px1] = fg_color
+        cursor_x += char_w + scale
+
+
+def draw_lesion_bboxes_scratch(
+    rgb_img: np.ndarray,
+    bboxes: List[Tuple[int, int, int, int, int]],
+    box_color: Tuple[int, int, int] = (239, 68, 68),
+    thickness: int = 2,
+    draw_labels: bool = True,
+) -> np.ndarray:
+    """Vẽ hộp bao Bounding Box và số thứ tự ổ bệnh trực tiếp lên ảnh RGB bằng mảng NumPy.
+
+    Args:
+        rgb_img: Ảnh RGB gốc kích thước `(H, W, 3)` hoặc ảnh xám `(H, W)`, kiểu `np.uint8`.
+        bboxes: Danh sách các hộp bao `(x, y, w, h, area)` từ `connected_components_bfs_scratch`.
+        box_color: Màu RGB cho đường viền hộp bao. Mặc định là đỏ `(239, 68, 68)`.
+        thickness: Độ dày đường viền (pixel). Mặc định là 2.
+        draw_labels: Nếu True, vẽ số thứ tự `#1`, `#2`, ... ở góc trên trái mỗi BBox.
+
+    Returns:
+        np.ndarray: Bản sao ảnh RGB kích thước `(H, W, 3)` kiểu `np.uint8` đã được đánh dấu các ổ bệnh.
+    """
+    if rgb_img.ndim == 2:
+        canvas = np.stack([rgb_img, rgb_img, rgb_img], axis=-1).astype(np.uint8)
+    else:
+        canvas = rgb_img.copy().astype(np.uint8)
+
+    H, W = canvas.shape[:2]
+    scale = 1 if max(H, W) < 400 else 2
+
+    for idx, bbox in enumerate(bboxes, start=1):
+        x, y, w, h = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+        x1 = max(0, min(W - 1, x))
+        y1 = max(0, min(H - 1, y))
+        x2 = max(0, min(W - 1, x + w - 1))
+        y2 = max(0, min(H - 1, y + h - 1))
+
+        # Vẽ 4 cạnh hộp bao bằng NumPy slicing
+        canvas[y1 : min(H, y1 + thickness), x1 : x2 + 1] = box_color
+        canvas[max(0, y2 - thickness + 1) : y2 + 1, x1 : x2 + 1] = box_color
+        canvas[y1 : y2 + 1, x1 : min(W, x1 + thickness)] = box_color
+        canvas[y1 : y2 + 1, max(0, x2 - thickness + 1) : x2 + 1] = box_color
+
+        if draw_labels:
+            label_text = f"#{idx}"
+            label_h = 7 * scale + 4 * scale
+            label_y = y1 - label_h if y1 >= label_h else y1
+            _draw_text_numpy(
+                canvas,
+                text=label_text,
+                top_y=label_y,
+                left_x=x1,
+                fg_color=(255, 255, 255),
+                bg_color=box_color,
+                scale=scale,
+            )
+
+    return canvas

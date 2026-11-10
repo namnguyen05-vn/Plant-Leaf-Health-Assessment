@@ -35,6 +35,7 @@ from src.postprocess import (
     closing_scratch,
     connected_components_bfs_scratch,
     dilate_scratch,
+    draw_lesion_bboxes_scratch,
     erode_scratch,
     opening_scratch,
 )
@@ -307,7 +308,10 @@ def test_color_clustering_contract(synthetic_leaf_rgb: np.ndarray, synthetic_lea
 def test_morphology_contract():
     """Kiểm tra hợp đồng các hàm hình thái học nhị phân (Erode, Dilate, Opening, Closing)."""
     mask = np.zeros((50, 50), dtype=np.uint8)
-    mask[20:30, 20:30] = 255
+    mask[20:30, 20:30] = 255  # Khối vuông 10x10 = 100 px
+    # Thêm 1 nhiễu hạt đơn 1px và 1 lỗ hổng nhỏ 1px
+    mask[5, 5] = 255
+    mask[25, 25] = 0
 
     for morph_func in [erode_scratch, dilate_scratch, opening_scratch, closing_scratch]:
         try:
@@ -318,13 +322,20 @@ def test_morphology_contract():
         except NotImplementedError:
             pytest.skip(f"{morph_func.__name__} chưa được triển khai.")
 
+    # Kiểm chứng tính chất hình thái học
+    opened = opening_scratch(mask, kernel_size=3)
+    assert opened[5, 5] == 0, "Opening phải loại bỏ được đốm nhiễu 1px rời rạc."
 
-def test_connected_components_bfs_contract():
-    """Kiểm tra hợp đồng thuật toán BFS tìm thành phần liên thông đếm ổ bệnh."""
-    mask = np.zeros((100, 100), dtype=np.uint8)
-    # Tạo 2 ổ bệnh hợp lệ (diện tích > 20)
-    mask[10:20, 10:20] = 255  # Diện tích 100 px
-    mask[40:50, 40:50] = 255  # Diện tích 100 px
+    closed = closing_scratch(mask, kernel_size=3)
+    assert closed[25, 25] == 255, "Closing phải lấp đầy lỗ thủng 1px bên trong vùng trắng."
+
+
+def test_connected_components_bfs_contract(synthetic_leaf_rgb: np.ndarray):
+    """Kiểm tra hợp đồng thuật toán BFS tìm thành phần liên thông đếm ổ bệnh & vẽ BBox."""
+    mask = np.zeros((120, 120), dtype=np.uint8)
+    # Tạo 2 ổ bệnh có diện tích khác nhau (đều >= 20)
+    mask[10:18, 10:18] = 255  # Diện tích 64 px
+    mask[40:55, 40:55] = 255  # Diện tích 225 px (lớn hơn, phải đứng đầu)
     # Tạo 1 đốm nhiễu nhỏ diện tích 4 px
     mask[80:82, 80:82] = 255
 
@@ -341,16 +352,27 @@ def test_connected_components_bfs_contract():
     assert cmask.shape == mask.shape, "Cleaned mask phải có cùng kích thước (H, W)."
     assert cmask.dtype == np.uint8, "Cleaned mask phải có kiểu np.uint8."
     assert set(np.unique(cmask)).issubset({0, 255}), "Cleaned mask chỉ chứa {0, 255}."
+    assert cmask[80, 80] == 0, "Nhiễu diện tích < min_area phải bị xóa sạch."
 
     # num_lesions và bboxes
     assert isinstance(res["num_lesions"], int), "Số lượng ổ bệnh num_lesions phải là int."
+    assert res["num_lesions"] == 2, f"Phải đếm được đúng 2 ổ bệnh, thực tế: {res['num_lesions']}."
     assert len(res["bboxes"]) == res["num_lesions"], "Số lượng BBox phải bằng num_lesions."
 
+    areas = []
     for bbox in res["bboxes"]:
         assert len(bbox) == 5, f"BBox phải có đúng 5 thành phần (x, y, w, h, area), thực tế: {bbox}."
         x, y, w, h, area = bbox
         assert area >= 20, f"Diện tích ổ bệnh phải >= min_area (20), thực tế: {area}."
         assert w > 0 and h > 0, "Kích thước w, h của BBox phải dương."
+        areas.append(area)
+
+    assert areas == sorted(areas, reverse=True), "Danh sách BBox phải được sắp xếp theo diện tích giảm dần."
+
+    # Kiểm tra vẽ BBox bằng NumPy
+    annotated = draw_lesion_bboxes_scratch(synthetic_leaf_rgb, res["bboxes"])
+    assert annotated.shape == synthetic_leaf_rgb.shape
+    assert annotated.dtype == np.uint8
 
 
 # =============================================================================
@@ -358,7 +380,7 @@ def test_connected_components_bfs_contract():
 # =============================================================================
 
 def test_benchmark_metrics_contract():
-    """Kiểm tra hợp đồng tính chỉ số phân đoạn IoU, Dice, Precision, Recall, Accuracy."""
+    """Kiểm tra hợp đồng tính chỉ số phân đoạn IoU, Dice, Precision, Recall, Accuracy, MSE, PSNR."""
     mask1 = np.zeros((100, 100), dtype=np.uint8)
     mask2 = np.zeros((100, 100), dtype=np.uint8)
     mask1[20:60, 20:60] = 255
@@ -372,21 +394,69 @@ def test_benchmark_metrics_contract():
     required_keys = {"iou", "dice", "precision", "recall", "accuracy"}
     assert required_keys.issubset(metrics.keys()), f"Thiếu chỉ số: {required_keys - set(metrics.keys())}"
 
-    for key, val in metrics.items():
+    for key in required_keys:
+        val = metrics[key]
         assert isinstance(val, (float, np.floating)), f"Chỉ số {key} phải là float."
         assert 0.0 <= val <= 1.0, f"Chỉ số {key} phải nằm trong khoảng [0.0, 1.0], thực tế: {val}."
 
+    # Kiểm tra trường hợp 2 ảnh giống hệt nhau -> MSE = 0, PSNR = 100.0
+    sim_same = compute_image_similarity_metrics(mask1, mask1)
+    assert sim_same["mse"] == 0.0
+    assert sim_same["psnr"] == 100.0
 
-def test_diagnosis_contract(synthetic_leaf_mask: np.ndarray):
-    """Kiểm tra hợp đồng hàm chẩn đoán 5 cấp độ bệnh lá cây."""
-    disease_mask = np.zeros_like(synthetic_leaf_mask)
-    # Tạo vết bệnh chiếm khoảng 10% diện tích phiến lá (Cấp 2)
-    disease_mask[55:65, 55:65] = 255
+
+def test_benchmark_opencv_baselines_contract(
+    synthetic_leaf_gray: np.ndarray,
+    synthetic_leaf_rgb: np.ndarray,
+    synthetic_leaf_mask: np.ndarray,
+):
+    """Kiểm tra hợp đồng chạy Otsu và K-means đối sánh bằng OpenCV."""
+    try:
+        otsu_cv = run_opencv_otsu(synthetic_leaf_gray)
+        otsu_cv_roi = run_opencv_otsu(synthetic_leaf_gray, roi_mask=synthetic_leaf_mask)
+    except NotImplementedError:
+        pytest.skip("run_opencv_otsu chưa được triển khai.")
+
+    assert {"threshold", "binary_mask", "exec_time_ms"}.issubset(otsu_cv.keys())
+    assert 0 <= otsu_cv["threshold"] <= 255
+    assert otsu_cv["binary_mask"].shape == synthetic_leaf_gray.shape
+    assert otsu_cv["binary_mask"].dtype == np.uint8
+    assert set(np.unique(otsu_cv["binary_mask"])).issubset({0, 255})
+    assert otsu_cv_roi["binary_mask"].shape == synthetic_leaf_gray.shape
 
     try:
-        diag = diagnose_leaf_severity(synthetic_leaf_mask, disease_mask, num_lesions=1)
+        km_cv = run_opencv_kmeans(synthetic_leaf_rgb, k=3, roi_mask=synthetic_leaf_mask)
     except NotImplementedError:
-        pytest.skip("diagnose_leaf_severity chưa được triển khai.")
+        pytest.skip("run_opencv_kmeans chưa được triển khai.")
+
+    assert {"segmented_img", "labels_2d", "centroids", "exec_time_ms"}.issubset(km_cv.keys())
+    assert km_cv["segmented_img"].shape == synthetic_leaf_rgb.shape
+    assert km_cv["segmented_img"].dtype == np.uint8
+    assert km_cv["labels_2d"].shape == synthetic_leaf_rgb.shape[:2]
+    assert km_cv["labels_2d"].dtype == np.int32
+    assert km_cv["centroids"].shape == (3, 3)
+
+
+def test_diagnosis_contract(synthetic_leaf_mask: np.ndarray):
+    """Kiểm tra hợp đồng hàm chẩn đoán 5 cấp độ bệnh lá cây (0..4)."""
+    leaf_only = np.zeros((100, 100), dtype=np.uint8)
+    leaf_only[:, :] = 255  # 10,000 px
+
+    # Cấp 0: < 1% (50 px = 0.5%)
+    d0 = np.zeros_like(leaf_only)
+    d0[0:5, 0:10] = 255
+    # Cấp 1: 1%..10% (500 px = 5%)
+    d1 = np.zeros_like(leaf_only)
+    d1[0:50, 0:10] = 255
+    # Cấp 2: 10%..25% (1500 px = 15%)
+    d2 = np.zeros_like(leaf_only)
+    d2[0:15, 0:100] = 255
+    # Cấp 3: 25%..50% (3000 px = 30%)
+    d3 = np.zeros_like(leaf_only)
+    d3[0:30, 0:100] = 255
+    # Cấp 4: >= 50% (6000 px = 60%)
+    d4 = np.zeros_like(leaf_only)
+    d4[0:60, 0:100] = 255
 
     required_keys = {
         "severity_level",
@@ -397,12 +467,19 @@ def test_diagnosis_contract(synthetic_leaf_mask: np.ndarray):
         "disease_area_px",
         "recommendation",
     }
-    assert required_keys.issubset(diag.keys()), f"Thiếu khóa trong kết quả chẩn đoán: {required_keys - set(diag.keys())}"
 
-    assert 0 <= diag["severity_level"] <= 4, f"Cấp độ bệnh phải từ 0 đến 4, thực tế: {diag['severity_level']}."
-    assert 0.0 <= diag["disease_ratio_percent"] <= 100.0, "Tỷ lệ bệnh phải nằm trong [0.0, 100.0]."
-    assert isinstance(diag["recommendation"], str), "Khuyến nghị điều trị phải là dạng chuỗi str."
-    assert len(diag["recommendation"]) > 0, "Khuyến nghị không được để trống."
+    for expected_lvl, dmask in enumerate([d0, d1, d2, d3, d4]):
+        try:
+            diag = diagnose_leaf_severity(leaf_only, dmask, num_lesions=1)
+        except NotImplementedError:
+            pytest.skip("diagnose_leaf_severity chưa được triển khai.")
+
+        assert required_keys.issubset(diag.keys())
+        assert diag["severity_level"] == expected_lvl, (
+            f"Với tỷ lệ {diag['disease_ratio_percent']}%, kỳ vọng cấp {expected_lvl}, thực tế {diag['severity_level']}."
+        )
+        assert 0.0 <= diag["disease_ratio_percent"] <= 100.0
+        assert isinstance(diag["recommendation"], str) and len(diag["recommendation"]) > 0
 
 
 # =============================================================================
@@ -410,13 +487,15 @@ def test_diagnosis_contract(synthetic_leaf_mask: np.ndarray):
 # =============================================================================
 
 def test_pipeline_integration_contract(synthetic_leaf_rgb: np.ndarray):
-    """Kiểm tra hợp đồng hàm điều phối toàn trình pipeline.py."""
+    """Kiểm tra hợp đồng hàm điều phối toàn trình pipeline.py (kèm cơ chế fallback)."""
     try:
         result = run_full_diagnosis_pipeline(
             file_source=synthetic_leaf_rgb,
             k_clusters=3,
-            blur_kernel=5,
+            blur_kernel=3,
             min_lesion_area=20,
+            morph_kernel=3,
+            run_benchmark_comparison=True,
         )
     except NotImplementedError:
         pytest.skip("run_full_diagnosis_pipeline chưa được tích hợp hoàn chỉnh.")
@@ -425,9 +504,18 @@ def test_pipeline_integration_contract(synthetic_leaf_rgb: np.ndarray):
         "original_rgb",
         "grayscale",
         "otsu_result",
+        "leaf_mask",
         "kmeans_result",
         "color_result",
         "postprocess_result",
+        "annotated_img",
         "diagnosis",
+        "benchmark",
+        "using_fallback",
     }
     assert required_stages.issubset(result.keys()), f"Thiếu kết quả các tầng trong pipeline: {required_stages - set(result.keys())}"
+    assert result["annotated_img"].shape == synthetic_leaf_rgb.shape
+    assert result["postprocess_result"]["num_lesions"] >= 1, "Ảnh lá có 2 đốm bệnh giả lập phải phát hiện được ít nhất 1 ổ bệnh."
+    assert 0 <= result["diagnosis"]["severity_level"] <= 4
+    assert "otsu_metrics" in result["benchmark"]
+    assert "kmeans_disease_metrics" in result["benchmark"]

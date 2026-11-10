@@ -1,26 +1,23 @@
 """Full End-to-End Plant Leaf Health Diagnosis Pipeline Module.
 
 Module điều phối luồng xử lý toàn trình (End-to-End Pipeline) kết nối tuần tự
-tất cả các module thành phần của hệ thống phân tích sức khỏe lá cây:
+tất cả các module thành phần của hệ thống phân tích sức khỏe lá cây (Phiên bản nâng cấp thực địa):
     1. Đọc dữ liệu ảnh / ma trận CSV (`data_io`)
-    2. Tiền xử lý: Làm mịn Gauss, chuyển đổi Grayscale và HSV -> Tách lá khỏi nền bằng Otsu trên kênh Saturation (`preprocess`, `otsu`)
-    3. Phân cụm màu sắc mô lá bằng K-Means vector hóa trong vùng ROI (`kmeans`)
-    4. Phân tích phổ màu: Tách biệt mô lá khỏe mạnh và mô hoại tử đốm bệnh (`color_clustering`)
-    5. Hậu xử lý: Hình thái học nhị phân (Closing -> Opening) và thuật toán BFS đếm ổ bệnh (`postprocess`)
-    6. Chẩn đoán y bạ cây trồng 5 cấp độ & Đối sánh định lượng với OpenCV (`benchmark`)
-
-CƠ CHẾ FALLBACK THÔNG MINH:
-- Khi gọi các hàm từ module của các thành viên khác (`data_io`, `preprocess`, `otsu`, `kmeans`, `color_clustering`),
-  hệ thống bọc trong khối `try ... except NotImplementedError:`.
-- Nếu module của thành viên đã được merge, pipeline chạy code thật của họ.
-- Nếu hàm vẫn đang ném `NotImplementedError`, pipeline tự động kích hoạt hàm dự phòng nội bộ
-  bằng NumPy và đánh dấu cờ `"using_fallback": True` để ứng dụng luôn vận hành trơn tru 100%.
+    2. Tiền xử lý & Tách vùng lá ROI chống nhiễu nền đất/gỗ nâu (`preprocess`, `otsu`, `postprocess`):
+       - Xây dựng Bản đồ đặc trưng thực vật kết hợp (Vegetation Feature Map = sqrt(clip(2G - R - B) * S))
+       - Otsu Thresholding + Closing + Giữ thành phần liên thông lớn nhất + Lấp lỗ thủng BFS (Hole Filling)
+    3. Phân đoạn bệnh học trong vùng lá (`kmeans`, `color_clustering`):
+       - Không gian đặc trưng nhạy bệnh học (R, G, B, R-G, (R-G)/(R+G), Hue) với mặc định k=4
+       - Kết hợp phân cụm K-means, phân ngưỡng Otsu trên bản đồ (R-G) và quy tắc màu Tâm nâu + Quầng vàng
+         với tham số điều chỉnh độ nhạy `yellow_halo_sensitivity` (chống nhiễu chói nắng trắng)
+    4. Hậu xử lý: Hình thái học (`closing_scratch` -> `opening_scratch`) gom các chấm nâu & quầng vàng
+       thành ổ bệnh thống nhất + BFS đếm ổ bệnh & vẽ Bounding Box (`postprocess`)
+    5. Chẩn đoán y bạ cây trồng 5 cấp độ & Đối sánh định lượng với OpenCV (`benchmark`)
 """
 
-import io
-import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+import time
+from typing import Any, Dict, List, Optional, Union
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -38,6 +35,8 @@ from src.postprocess import (
     closing_scratch,
     connected_components_bfs_scratch,
     draw_lesion_bboxes_scratch,
+    fill_holes_bfs_scratch,
+    keep_largest_connected_component_scratch,
     opening_scratch,
 )
 from src.benchmark import (
@@ -59,10 +58,8 @@ def _fallback_load_image_or_csv(
 ) -> np.ndarray:
     """Fallback nội bộ đọc ảnh (.png/.jpg) hoặc ma trận (.csv) và resize giữ tỷ lệ."""
     if isinstance(file_source, np.ndarray):
-        arr = file_source.astype(np.uint8)
-        return arr
+        return file_source.astype(np.uint8)
 
-    # Xác định đuôi file từ đường dẫn hoặc đối tượng UploadedFile
     filename = ""
     if isinstance(file_source, (str, Path)):
         path_obj = Path(file_source)
@@ -76,10 +73,8 @@ def _fallback_load_image_or_csv(
         if hasattr(file_source, "seek"):
             file_source.seek(0)
         df = pd.read_csv(file_source, header=None)
-        mat = np.clip(np.round(df.to_numpy(dtype=np.float64)), 0, 255).astype(np.uint8)
-        return mat
+        return np.clip(np.round(df.to_numpy(dtype=np.float64)), 0, 255).astype(np.uint8)
 
-    # Đọc ảnh thông qua PIL
     if hasattr(file_source, "seek"):
         file_source.seek(0)
     pil_img = Image.open(file_source).convert("RGB")
@@ -113,7 +108,6 @@ def _fallback_rgb_to_hsv(rgb_img: np.ndarray) -> np.ndarray:
     cmin = np.min(rgb, axis=2)
     delta = cmax - cmin
 
-    # Hue (0..360)
     h = np.zeros_like(cmax, dtype=np.float32)
     nonzero_delta = delta > 1e-6
 
@@ -125,7 +119,6 @@ def _fallback_rgb_to_hsv(rgb_img: np.ndarray) -> np.ndarray:
     h[mask_g] = 60.0 * (((b[mask_g] - r[mask_g]) / delta[mask_g]) + 2.0)
     h[mask_b] = 60.0 * (((r[mask_b] - g[mask_b]) / delta[mask_b]) + 4.0)
 
-    # Saturation & Value
     s = np.where(cmax > 1e-6, delta / np.where(cmax > 1e-6, cmax, 1.0), 0.0)
     v = cmax
 
@@ -224,13 +217,13 @@ def _fallback_otsu_threshold(
 
 def _fallback_kmeans(
     img: np.ndarray,
-    k: int = 3,
+    k: int = 4,
     max_iter: int = 100,
     tol: float = 1e-3,
     random_state: int = 42,
     roi_mask: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
-    """Fallback K-Means vector hóa bằng NumPy với khởi tạo K-Means++."""
+    """Fallback K-Means vector hóa bằng NumPy với khởi tạo K-Means++ (hỗ trợ C kênh đặc trưng)."""
     t_start = time.perf_counter()
     H, W = img.shape[:2]
     C = 1 if img.ndim == 2 else img.shape[2]
@@ -328,8 +321,9 @@ def _fallback_extract_disease_and_healthy_masks(
     labels_2d: np.ndarray,
     centroids: np.ndarray,
     leaf_mask: Optional[np.ndarray] = None,
+    yellow_halo_sensitivity: float = 0.65,
 ) -> Dict[str, Any]:
-    """Fallback phân tích màu tâm cụm dựa trên Excess Green Index (ExG = 2G - R - B)."""
+    """Fallback phân tích cụm dựa trên cả Tâm nâu (Necrosis) và Quầng vàng (Chlorosis)."""
     H, W = labels_2d.shape
     valid_labels = set(np.unique(labels_2d).tolist())
     valid_cluster_ids = sorted([int(cid) for cid in valid_labels if cid >= 0])
@@ -338,11 +332,15 @@ def _fallback_extract_disease_and_healthy_masks(
         empty = np.zeros((H, W), dtype=np.uint8)
         return {"disease_mask": empty, "healthy_mask": empty.copy(), "disease_cluster_ids": []}
 
-    # Tính ExG = 2G - R - B cho các tâm cụm hợp lệ
+    sens = float(np.clip(yellow_halo_sensitivity, 0.0, 1.0))
+    halo_rg_ratio = 0.94 - 0.18 * sens
+    necrotic_rg_ratio = 0.90 - 0.08 * sens
+    max_b_ratio = 0.58 + 0.18 * sens
+    min_rg_minus_b = 30.0 - 18.0 * sens
+
     c_arr = centroids.astype(np.float32)
     exg_map: Dict[int, float] = {}
-    gr_diff_map: Dict[int, float] = {}
-    brightness_map: Dict[int, float] = {}
+    rgb_map: Dict[int, tuple] = {}
 
     for cid in valid_cluster_ids:
         if c_arr.shape[1] >= 3:
@@ -350,24 +348,43 @@ def _fallback_extract_disease_and_healthy_masks(
         else:
             r = g = b = float(c_arr[cid, 0])
         exg_map[cid] = 2.0 * g - r - b
-        gr_diff_map[cid] = g - r
-        brightness_map[cid] = (r + g + b) / 3.0
+        rgb_map[cid] = (r, g, b)
 
-    best_exg = max(exg_map.values())
+    # Ước lượng ExG trung vị toàn lá để làm mốc so sánh tâm cụm
+    if leaf_mask is not None and int(np.sum(leaf_mask > 0)) > 0:
+        leaf_rgb = rgb_img[leaf_mask > 0].astype(np.float32)
+        leaf_exg_med = float(np.median(2.0 * leaf_rgb[:, 1] - leaf_rgb[:, 0] - leaf_rgb[:, 2]))
+    else:
+        leaf_exg_med = max(exg_map.values())
+
     disease_cluster_ids: List[int] = []
-
     for cid in valid_cluster_ids:
+        r, g, b = rgb_map[cid]
         exg = exg_map[cid]
-        gr_diff = gr_diff_map[cid]
-        bright = brightness_map[cid]
-        # Cụm bệnh: sắc đỏ >= sắc xanh (nâu/vàng/cam) hoặc độ xanh giảm sâu / đốm hoại tử tối
-        is_non_green = gr_diff <= 5.0
-        is_low_exg = (exg < 0.35 * best_exg) and (exg < 85.0)
-        is_dark_necrosis = (bright < 55.0) and (exg < 25.0)
-        if is_non_green or is_low_exg or is_dark_necrosis:
+        bright = (r + g + b) / 3.0
+
+        is_white_glare = (r > 200.0) and (g > 200.0) and (b > 175.0) and (g >= r * 0.94)
+        is_strong_green = (g > r * 1.28) and (exg > 70.0) and ((r - g) < -25.0)
+        if is_white_glare or is_strong_green:
+            continue
+
+        # Điều kiện 1: Tâm nâu/đen hoại tử (Necrotic)
+        is_necrotic = (
+            (r >= g * necrotic_rg_ratio and bright < 185.0 and b < max(r, g) * 0.90)
+            or (exg < min(30.0, leaf_exg_med - (125.0 - 55.0 * sens)) and r >= g * 0.78 and bright < 175.0)
+        )
+        # Điều kiện 2: Quầng vàng / vàng cam (Chlorotic Halo)
+        is_yellow_halo = (
+            (r >= g * halo_rg_ratio)
+            and (b < max(r, g) * max_b_ratio)
+            and ((min(r, g) - b) >= min_rg_minus_b)
+            and (max(r, g) >= 70.0)
+        )
+
+        if is_necrotic or is_yellow_halo:
             disease_cluster_ids.append(cid)
 
-    # Bảo vệ: nếu mọi cụm đều bị đánh là bệnh, giữ lại cụm có ExG cao nhất làm mô khỏe
+    # Bảo vệ: giữ lại ít nhất cụm xanh khỏe nhất nếu tất cả đều bị gắn nhãn bệnh
     if len(disease_cluster_ids) == len(valid_cluster_ids) and len(valid_cluster_ids) > 1:
         healthiest_cid = max(valid_cluster_ids, key=lambda c: exg_map[c])
         disease_cluster_ids = [c for c in disease_cluster_ids if c != healthiest_cid]
@@ -391,6 +408,157 @@ def _fallback_extract_disease_and_healthy_masks(
         "disease_mask": disease_mask,
         "healthy_mask": healthy_mask,
         "disease_cluster_ids": disease_cluster_ids,
+    }
+
+
+# =============================================================================
+# CÁC HÀM ĐẶC TRƯNG NÂNG CẤP TẦNG 1 & TẦNG 2 (NUMPY FROM SCRATCH)
+# =============================================================================
+
+def compute_vegetation_feature_map(
+    rgb_img: np.ndarray,
+    hsv_img: np.ndarray,
+) -> np.ndarray:
+    """Xây dựng Bản đồ đặc trưng thực vật kết hợp (Vegetation Feature Map) bằng NumPy.
+
+    Công thức:
+        ExG = clip(2 * G - R - B, 0, 255)
+        VegMap = clip(round(sqrt(ExG * S)), 0, 255)
+
+    Kết hợp này giữ nguyên độ nổi bật của mô lá xanh lục (ExG cao và S cao)
+    đồng thời triệt tiêu triệt để nền đất/gỗ màu nâu vàng (R > G nên ExG = 0)
+    và nền trắng/xám/đen (S thấp).
+
+    Args:
+        rgb_img: Ảnh RGB `(H, W, 3)` `uint8`.
+        hsv_img: Ảnh HSV `(H, W, 3)` `uint8` (kênh S ở trục 1).
+
+    Returns:
+        np.ndarray: Bản đồ đặc trưng 2D `(H, W)` kiểu `np.uint8`.
+    """
+    r = rgb_img[:, :, 0].astype(np.float32)
+    g = rgb_img[:, :, 1].astype(np.float32)
+    b = rgb_img[:, :, 2].astype(np.float32)
+
+    exg = np.clip(2.0 * g - r - b, 0.0, 255.0)
+    sat = hsv_img[:, :, 1].astype(np.float32)
+
+    veg_map = np.sqrt(exg * sat)
+    return np.clip(np.round(veg_map), 0, 255).astype(np.uint8)
+
+
+def build_pathology_feature_space(
+    rgb_img: np.ndarray,
+    hsv_img: np.ndarray,
+) -> np.ndarray:
+    """Chuyển đổi ảnh RGB sang không gian đặc trưng 6 kênh nhạy với bệnh lá cây.
+
+    Các kênh đầu ra `(H, W, 6)` kiểu `np.uint8`:
+        - Kênh 0..2: `R, G, B` gốc (giữ nguyên tương thích tọa độ màu tâm cụm)
+        - Kênh 3: Độ lệch Đỏ-Xanh lá `clip(128 + 1.5 * (R - G), 0, 255)`
+        - Kênh 4: Chỉ số vàng/hoại tử chuẩn hóa `clip(128 + 200 * (R - G) / (R + G + 1e-5), 0, 255)`
+        - Kênh 5: Kênh sắc độ Hue `H` từ không gian HSV `[0, 255]`
+    """
+    r = rgb_img[:, :, 0].astype(np.float32)
+    g = rgb_img[:, :, 1].astype(np.float32)
+
+    rg_diff = r - g
+    norm_rg = rg_diff / (r + g + 1e-5)
+
+    rg_u8 = np.clip(np.round(128.0 + 1.5 * rg_diff), 0.0, 255.0).astype(np.uint8)
+    nrg_u8 = np.clip(np.round(128.0 + 200.0 * norm_rg), 0.0, 255.0).astype(np.uint8)
+    hue_u8 = hsv_img[:, :, 0].astype(np.uint8)
+
+    return np.stack(
+        [rgb_img[:, :, 0], rgb_img[:, :, 1], rgb_img[:, :, 2], rg_u8, nrg_u8, hue_u8],
+        axis=-1,
+    )
+
+
+def detect_pathology_disease_mask(
+    blurred_rgb: np.ndarray,
+    leaf_mask: np.ndarray,
+    cluster_disease_mask: np.ndarray,
+    yellow_halo_sensitivity: float = 0.65,
+    fallback_tracker: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Kết hợp cụm K-means, Otsu trên bản đồ `(R - G)` và quy tắc màu Tâm nâu + Quầng vàng.
+
+    Giúp bắt trọn đồng thời:
+        - Tâm nâu/đen hoại tử (Necrosis)
+        - Quầng vàng/vàng cam (Chlorosis Halo) bao quanh đốm bệnh
+        - Đốm bệnh nhỏ (< 3% diện tích lá) trên mặt lá bóng nắng (chặn nhiễu chói trắng)
+    """
+    leaf_bool = leaf_mask > 0
+    if int(np.sum(leaf_bool)) == 0:
+        empty = np.zeros_like(leaf_mask, dtype=np.uint8)
+        return {"disease_mask": empty, "healthy_mask": empty.copy(), "rg_otsu_threshold": 0}
+
+    sens = float(np.clip(yellow_halo_sensitivity, 0.0, 1.0))
+
+    r = blurred_rgb[:, :, 0].astype(np.float32)
+    g = blurred_rgb[:, :, 1].astype(np.float32)
+    b = blurred_rgb[:, :, 2].astype(np.float32)
+
+    exg = 2.0 * g - r - b
+    rg_diff = r - g
+    brightness = (r + g + b) / 3.0
+
+    median_exg = float(np.median(exg[leaf_bool]))
+    median_rg = float(np.median(rg_diff[leaf_bool]))
+
+    # Phân ngưỡng Otsu trên bản đồ chỉ số bệnh học (R - G) bên trong vùng leaf_mask
+    rg_shift = np.clip(np.round(128.0 + rg_diff), 0.0, 255.0).astype(np.uint8)
+    rg_otsu_res = call_otsu(rg_shift, roi_mask=leaf_mask, fallback_tracker=fallback_tracker)
+    rg_otsu_mask = rg_otsu_res["binary_mask"] > 0
+
+    # Các ngưỡng màu học động theo thanh trượt Yellow Halo Sensitivity (0.0 .. 1.0)
+    necrotic_ratio = 0.90 - 0.08 * sens     # ~0.85 tại sens=0.65
+    halo_ratio = 0.94 - 0.18 * sens         # ~0.82 tại sens=0.65
+    max_b_ratio = 0.58 + 0.18 * sens        # ~0.70 tại sens=0.65
+    min_rg_minus_b = 30.0 - 18.0 * sens     # ~18.3 tại sens=0.65
+    exg_drop = 125.0 - 55.0 * sens          # ~89.2 tại sens=0.65
+
+    # Chống nhiễu vùng trắng chói nắng (R, G, B đều cao và G >= R) & vùng lá xanh đậm khỏe mạnh
+    is_white_glare = (r > 200.0) & (g > 200.0) & (b > 175.0) & (g >= r * 0.94)
+    is_strong_green = (g > r * (1.30 - 0.05 * sens)) & (exg > 70.0) & (rg_diff < -25.0)
+
+    # 1. Tâm nâu / đen hoại tử (Necrosis)
+    cond_necrotic = (
+        (r >= g * necrotic_ratio) & (brightness < 185.0) & (b < np.maximum(r, g) * 0.90)
+    ) | (
+        (exg < min(30.0, median_exg - exg_drop)) & (r >= g * 0.78) & (brightness < 175.0)
+    )
+
+    # 2. Quầng vàng / vàng cam (Chlorosis Halo)
+    cond_yellow_halo = (
+        (r >= g * halo_ratio)
+        & (b < np.maximum(r, g) * max_b_ratio)
+        & ((np.minimum(r, g) - b) >= min_rg_minus_b)
+        & (np.maximum(r, g) >= 70.0)
+    )
+
+    # 3. Kết hợp Otsu trên bản đồ (R - G) có khóa bảo vệ màu bệnh học
+    cond_rg_otsu = (
+        rg_otsu_mask
+        & (r >= g * (halo_ratio - 0.03 * sens))
+        & (b < np.maximum(r, g) * max_b_ratio)
+        & (rg_diff > median_rg + (40.0 - 20.0 * sens))
+    )
+
+    # Hợp nhất cùng mặt nạ từ K-means cluster selection
+    cluster_bool = cluster_disease_mask > 0
+    raw_disease_bool = leaf_bool & (~is_white_glare) & (~is_strong_green) & (
+        cluster_bool | cond_necrotic | cond_yellow_halo | cond_rg_otsu
+    )
+
+    disease_mask = np.where(raw_disease_bool, 255, 0).astype(np.uint8)
+    healthy_mask = np.where(leaf_bool & (~raw_disease_bool), 255, 0).astype(np.uint8)
+
+    return {
+        "disease_mask": disease_mask,
+        "healthy_mask": healthy_mask,
+        "rg_otsu_threshold": int(rg_otsu_res["threshold"]),
     }
 
 
@@ -419,8 +587,8 @@ def call_preprocess(
     blur_kernel: int = 5,
     blur_sigma: float = 1.0,
     fallback_tracker: Optional[List[str]] = None,
-) -> Dict[str, np.ndarray]:
-    """Thực thi tiền xử lý (RGB -> Gray, RGB -> HSV, Gaussian Blur) kèm cơ chế fallback."""
+) -> Dict[str, Any]:
+    """Thực thi tiền xử lý (Gauss Blur, RGB->Gray, RGB->HSV, Vegetation Feature Map) kèm fallback."""
     if img.ndim == 2:
         rgb_img = np.stack([img, img, img], axis=-1).astype(np.uint8)
         is_gray_source = True
@@ -450,8 +618,13 @@ def call_preprocess(
         hsv_img = _fallback_rgb_to_hsv(blurred_rgb)
 
     saturation = hsv_img[:, :, 1]
-    # Nếu đầu vào là ảnh xám đơn kênh (độ bão hòa bằng 0 toàn ảnh), dùng kênh Grayscale cho Otsu
-    otsu_input = gray_img if (is_gray_source or int(saturation.max()) == int(saturation.min())) else saturation
+    veg_map = compute_vegetation_feature_map(blurred_rgb, hsv_img)
+
+    # Dùng Vegetation Map làm đầu vào Otsu tách lá khỏi nền đất/nâu; fallback Gray nếu ảnh đơn sắc
+    if is_gray_source or (int(veg_map.max()) == int(veg_map.min())):
+        otsu_input = gray_img
+    else:
+        otsu_input = veg_map
 
     return {
         "original_rgb": rgb_img,
@@ -459,6 +632,7 @@ def call_preprocess(
         "grayscale": gray_img,
         "hsv": hsv_img,
         "saturation": saturation,
+        "vegetation_map": veg_map,
         "otsu_input": otsu_input,
     }
 
@@ -479,7 +653,7 @@ def call_otsu(
 
 def call_kmeans(
     img: np.ndarray,
-    k: int = 3,
+    k: int = 4,
     max_iter: int = 100,
     tol: float = 1e-3,
     random_state: int = 42,
@@ -504,6 +678,7 @@ def call_color_clustering(
     labels_2d: np.ndarray,
     centroids: np.ndarray,
     leaf_mask: Optional[np.ndarray] = None,
+    yellow_halo_sensitivity: float = 0.65,
     fallback_tracker: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Gọi `extract_disease_and_healthy_masks`, fallback sang cài đặt nội bộ nếu chưa merge."""
@@ -515,7 +690,11 @@ def call_color_clustering(
         if fallback_tracker is not None and "color_clustering" not in fallback_tracker:
             fallback_tracker.append("color_clustering")
         return _fallback_extract_disease_and_healthy_masks(
-            rgb_img, labels_2d, centroids, leaf_mask=leaf_mask
+            rgb_img,
+            labels_2d,
+            centroids,
+            leaf_mask=leaf_mask,
+            yellow_halo_sensitivity=yellow_halo_sensitivity,
         )
 
 
@@ -525,36 +704,28 @@ def call_color_clustering(
 
 def run_full_diagnosis_pipeline(
     file_source: Union[str, Path, np.ndarray, Any],
-    k_clusters: int = 3,
+    k_clusters: int = 4,
     blur_kernel: int = 5,
     blur_sigma: float = 1.0,
     min_lesion_area: int = 20,
-    morph_kernel: int = 3,
+    morph_kernel: int = 5,
+    yellow_halo_sensitivity: float = 0.65,
     run_benchmark_comparison: bool = True,
 ) -> Dict[str, Any]:
-    """Thực thi toàn bộ quy trình chẩn đoán sức khỏe lá cây từ ảnh đầu vào đến kết quả y bạ hoàn chỉnh.
-
-    Luồng xử lý 4 giai đoạn:
-        - Giai đoạn 1: Đọc dữ liệu -> Tiền xử lý làm mịn Gauss & chuyển đổi RGB/Gray/HSV
-          -> Tách phiến lá khỏi nền bằng Otsu trên kênh độ bão hòa (Saturation).
-        - Giai đoạn 2: Phân cụm màu sắc mô lá bằng K-Means trong vùng lá ROI &
-          Phân tích màu tâm cụm để trích xuất mặt nạ vết bệnh và mô khỏe.
-        - Giai đoạn 3: Hậu xử lý hình thái học (`closing_scratch`, `opening_scratch`)
-          và đếm ổ bệnh + vẽ hộp bao Bounding Box bằng `connected_components_bfs_scratch`.
-        - Giai đoạn 4: Chẩn đoán mức độ bệnh 5 cấp độ & Đối sánh định lượng với OpenCV.
+    """Thực thi toàn bộ quy trình chẩn đoán sức khỏe lá cây (nâng cấp chống nhiễu nền & bắt quầng vàng).
 
     Args:
         file_source: Đường dẫn file ảnh, mảng NumPy RGB `(H, W, 3)` hoặc `(H, W)`, hoặc đối tượng upload buffer.
-        k_clusters: Số cụm K-means phân đoạn màu mô lá (mặc định: 3).
+        k_clusters: Số cụm K-means trong không gian đặc trưng bệnh học (mặc định: 4).
         blur_kernel: Kích thước kernel lọc Gauss làm mịn (mặc định: 5).
         blur_sigma: Độ lệch chuẩn sigma của kernel lọc Gauss (mặc định: 1.0).
         min_lesion_area: Ngưỡng diện tích điểm ảnh tối thiểu để công nhận ổ bệnh (mặc định: 20).
-        morph_kernel: Kích thước kernel cho phép đóng/mở hình thái học (mặc định: 3).
+        morph_kernel: Kích thước kernel cho phép đóng Closing gom quầng vàng + tâm nâu (mặc định: 5).
+        yellow_halo_sensitivity: Độ nhạy bao phủ quầng vàng xung quanh ổ bệnh từ `0.0` đến `1.0` (mặc định: 0.65).
         run_benchmark_comparison: Cờ kích hoạt chạy đối sánh định lượng với OpenCV (mặc định: True).
 
     Returns:
-        Dict[str, Any]: Dictionary chuẩn chứa toàn bộ kết quả các tầng xử lý trung gian,
-            chẩn đoán y bạ, đối sánh OpenCV và cờ theo dõi fallback.
+        Dict[str, Any]: Dictionary chuẩn chứa kết quả các tầng xử lý, mặt nạ, chẩn đoán y bạ và benchmark.
     """
     fallback_modules: List[str] = []
 
@@ -566,20 +737,24 @@ def run_full_diagnosis_pipeline(
     rgb_img = prep["original_rgb"]
     blurred_rgb = prep["blurred_rgb"]
     gray_img = prep["grayscale"]
+    hsv_img = prep["hsv"]
     otsu_channel = prep["otsu_input"]
 
-    # 2. Giai đoạn 1: Tách nền bằng Otsu trên kênh Saturation (hoặc Grayscale nếu đầu vào xám)
+    # 2. Giai đoạn 1: Tách nền bằng Otsu trên Vegetation Feature Map -> Lọc thành phần lớn nhất -> Lấp lỗ thủng BFS
     otsu_res = call_otsu(otsu_channel, fallback_tracker=fallback_modules)
-    # Làm mượt mặt nạ lá bằng closing để lấp lỗ hổng nhỏ do vết hoại tử tối màu
-    leaf_mask = closing_scratch(otsu_res["binary_mask"], kernel_size=morph_kernel)
+    H, W = gray_img.shape
+    roi_close_k = 11 if min(H, W) >= 128 else 7
+    leaf_closed = closing_scratch(otsu_res["binary_mask"], kernel_size=roi_close_k)
+    leaf_main = keep_largest_connected_component_scratch(leaf_closed)
+    leaf_mask = fill_holes_bfs_scratch(leaf_main)
 
-    # Bảo vệ: nếu không tìm thấy pixel lá nào (ví dụ ảnh đồng nhất), coi toàn ảnh là ROI
     if int(np.sum(leaf_mask > 0)) == 0:
-        leaf_mask = np.full(gray_img.shape, 255, dtype=np.uint8)
+        leaf_mask = np.full((H, W), 255, dtype=np.uint8)
 
-    # 3. Giai đoạn 2: Phân cụm K-Means bên trong vùng lá ROI & Trích xuất vết bệnh
-    kmeans_res = call_kmeans(
-        blurred_rgb,
+    # 3. Giai đoạn 2: Phân cụm K-Means trên không gian đặc trưng nhạy bệnh học (6 kênh) bên trong leaf_mask
+    pathology_features = build_pathology_feature_space(blurred_rgb, hsv_img)
+    kmeans_raw = call_kmeans(
+        pathology_features,
         k=k_clusters,
         max_iter=100,
         tol=1e-3,
@@ -587,17 +762,42 @@ def run_full_diagnosis_pipeline(
         roi_mask=leaf_mask,
         fallback_tracker=fallback_modules,
     )
-    color_res = call_color_clustering(
-        rgb_img,
+    centroids_rgb = kmeans_raw["centroids"][:, :3].astype(np.float32)
+    segmented_rgb = kmeans_raw["segmented_img"][:, :, :3].astype(np.uint8)
+    kmeans_res: Dict[str, Any] = {
+        "segmented_img": segmented_rgb,
+        "labels_2d": kmeans_raw["labels_2d"],
+        "centroids": centroids_rgb,
+        "n_iter": kmeans_raw["n_iter"],
+        "exec_time_ms": kmeans_raw["exec_time_ms"],
+    }
+
+    cluster_color_res = call_color_clustering(
+        blurred_rgb,
         kmeans_res["labels_2d"],
-        kmeans_res["centroids"],
+        centroids_rgb,
         leaf_mask=leaf_mask,
+        yellow_halo_sensitivity=yellow_halo_sensitivity,
         fallback_tracker=fallback_modules,
     )
+    pathology_res = detect_pathology_disease_mask(
+        blurred_rgb=blurred_rgb,
+        leaf_mask=leaf_mask,
+        cluster_disease_mask=cluster_color_res["disease_mask"],
+        yellow_halo_sensitivity=yellow_halo_sensitivity,
+        fallback_tracker=fallback_modules,
+    )
+    color_res: Dict[str, Any] = {
+        "disease_mask": pathology_res["disease_mask"],
+        "healthy_mask": pathology_res["healthy_mask"],
+        "disease_cluster_ids": cluster_color_res["disease_cluster_ids"],
+        "rg_otsu_threshold": pathology_res["rg_otsu_threshold"],
+    }
 
-    # 4. Giai đoạn 3: Hậu xử lý Hình thái học & BFS đếm ổ bệnh
+    # 4. Giai đoạn 3: Hình thái học Closing (gom các chấm nâu & quầng vàng) -> Opening nhẹ -> BFS đếm ổ bệnh
     closed_disease = closing_scratch(color_res["disease_mask"], kernel_size=morph_kernel)
-    morphed_disease = opening_scratch(closed_disease, kernel_size=morph_kernel)
+    open_kernel = min(morph_kernel, 3)
+    morphed_disease = opening_scratch(closed_disease, kernel_size=open_kernel)
     post_res = connected_components_bfs_scratch(morphed_disease, min_area=min_lesion_area)
     annotated_img = draw_lesion_bboxes_scratch(rgb_img, post_res["bboxes"])
 
@@ -608,7 +808,7 @@ def run_full_diagnosis_pipeline(
         num_lesions=post_res["num_lesions"],
     )
 
-    # 6. Đối sánh định lượng với OpenCV baseline (nếu được bật)
+    # 6. Đối sánh định lượng với OpenCV baseline
     benchmark_res: Dict[str, Any] = {}
     if run_benchmark_comparison:
         otsu_cv = run_opencv_otsu(otsu_channel)
@@ -616,27 +816,41 @@ def run_full_diagnosis_pipeline(
             otsu_res["binary_mask"], otsu_cv["binary_mask"]
         )
 
-        kmeans_cv = run_opencv_kmeans(
-            blurred_rgb, k=k_clusters, max_iter=100, tol=1e-3, roi_mask=leaf_mask
+        kmeans_cv_raw = run_opencv_kmeans(
+            pathology_features, k=k_clusters, max_iter=100, tol=1e-3, roi_mask=leaf_mask
         )
+        kmeans_cv_rgb = {
+            "segmented_img": kmeans_cv_raw["segmented_img"][:, :, :3].astype(np.uint8),
+            "labels_2d": kmeans_cv_raw["labels_2d"],
+            "centroids": kmeans_cv_raw["centroids"][:, :3].astype(np.float32),
+            "exec_time_ms": kmeans_cv_raw["exec_time_ms"],
+        }
         kmeans_img_sim = compute_image_similarity_metrics(
-            kmeans_res["segmented_img"], kmeans_cv["segmented_img"]
+            kmeans_res["segmented_img"], kmeans_cv_rgb["segmented_img"]
         )
         cv_color = call_color_clustering(
-            rgb_img,
-            kmeans_cv["labels_2d"],
-            kmeans_cv["centroids"],
+            blurred_rgb,
+            kmeans_cv_rgb["labels_2d"],
+            kmeans_cv_rgb["centroids"],
             leaf_mask=leaf_mask,
+            yellow_halo_sensitivity=yellow_halo_sensitivity,
+            fallback_tracker=fallback_modules,
+        )
+        cv_pathology = detect_pathology_disease_mask(
+            blurred_rgb=blurred_rgb,
+            leaf_mask=leaf_mask,
+            cluster_disease_mask=cv_color["disease_mask"],
+            yellow_halo_sensitivity=yellow_halo_sensitivity,
             fallback_tracker=fallback_modules,
         )
         kmeans_disease_metrics = compute_segmentation_metrics_scratch(
-            color_res["disease_mask"], cv_color["disease_mask"]
+            color_res["disease_mask"], cv_pathology["disease_mask"]
         )
 
         benchmark_res = {
             "otsu_cv": otsu_cv,
             "otsu_metrics": otsu_metrics,
-            "kmeans_cv": kmeans_cv,
+            "kmeans_cv": kmeans_cv_rgb,
             "kmeans_similarity": kmeans_img_sim,
             "kmeans_disease_metrics": kmeans_disease_metrics,
         }
@@ -644,8 +858,9 @@ def run_full_diagnosis_pipeline(
     return {
         "original_rgb": rgb_img,
         "grayscale": gray_img,
-        "hsv": prep["hsv"],
+        "hsv": hsv_img,
         "saturation": prep["saturation"],
+        "vegetation_map": prep["vegetation_map"],
         "blurred": blurred_rgb,
         "otsu_channel": otsu_channel,
         "otsu_result": otsu_res,

@@ -245,6 +245,134 @@ def connected_components_bfs_scratch(
     }
 
 
+def fill_holes_bfs_scratch(mask: np.ndarray) -> np.ndarray:
+    """Lấp đầy toàn bộ lỗ thủng bên trong vùng tiền cảnh (Binary Hole Filling) bằng BFS từ viền ảnh.
+
+    Nguyên lý: Khởi tạo BFS 4-hướng từ tất cả các pixel nền (0) nằm trên 4 cạnh viền ảnh.
+    Mọi pixel nền không thể chạm tới từ viền ngoài đều là lỗ thủng nằm kín bên trong đối tượng
+    (ví dụ: đốm bệnh nâu/vàng hoặc vùng chói nắng bên trong phiến lá) và sẽ được lấp đầy thành 255.
+
+    Args:
+        mask: Mặt nạ nhị phân 2 chiều kích thước `(H, W)`, kiểu `np.uint8`, giá trị `{0, 255}`.
+
+    Returns:
+        np.ndarray: Mặt nạ đã lấp đầy lỗ thủng, kích thước `(H, W)`, kiểu `np.uint8`, giá trị `{0, 255}`.
+
+    Raises:
+        ValueError: Nếu `mask` không phải mảng 2 chiều.
+    """
+    if not isinstance(mask, np.ndarray) or mask.ndim != 2:
+        raise ValueError(
+            f"Mặt nạ đầu vào phải là mảng NumPy 2 chiều (H, W), nhận được: {getattr(mask, 'shape', type(mask))}."
+        )
+    H, W = mask.shape
+    if H == 0 or W == 0:
+        return mask.astype(np.uint8, copy=True)
+
+    fg = (mask > 0).tolist()
+    reachable_bg = [[False] * W for _ in range(H)]
+    queue: deque = deque()
+
+    # Thu thập toàn bộ pixel nền (== 0) nằm trên 4 cạnh viền ảnh
+    for c in range(W):
+        if not fg[0][c] and not reachable_bg[0][c]:
+            reachable_bg[0][c] = True
+            queue.append((0, c))
+        if not fg[H - 1][c] and not reachable_bg[H - 1][c]:
+            reachable_bg[H - 1][c] = True
+            queue.append((H - 1, c))
+    for r in range(1, H - 1):
+        if not fg[r][0] and not reachable_bg[r][0]:
+            reachable_bg[r][0] = True
+            queue.append((r, 0))
+        if not fg[r][W - 1] and not reachable_bg[r][W - 1]:
+            reachable_bg[r][W - 1] = True
+            queue.append((r, W - 1))
+
+    # BFS 4-hướng trên vùng nền ngoài để đảm bảo không rò qua biên chéo của lá
+    while queue:
+        r, c = queue.popleft()
+        if r > 0 and not fg[r - 1][c] and not reachable_bg[r - 1][c]:
+            reachable_bg[r - 1][c] = True
+            queue.append((r - 1, c))
+        if r + 1 < H and not fg[r + 1][c] and not reachable_bg[r + 1][c]:
+            reachable_bg[r + 1][c] = True
+            queue.append((r + 1, c))
+        if c > 0 and not fg[r][c - 1] and not reachable_bg[r][c - 1]:
+            reachable_bg[r][c - 1] = True
+            queue.append((r, c - 1))
+        if c + 1 < W and not fg[r][c + 1] and not reachable_bg[r][c + 1]:
+            reachable_bg[r][c + 1] = True
+            queue.append((r, c + 1))
+
+    bg_arr = np.asarray(reachable_bg, dtype=bool)
+    return np.where(~bg_arr, 255, 0).astype(np.uint8)
+
+
+def keep_largest_connected_component_scratch(mask: np.ndarray) -> np.ndarray:
+    """Giữ lại duy nhất thành phần liên thông 8-hướng có diện tích lớn nhất (chiếc lá chính).
+
+    Loại bỏ hoàn toàn các đốm cỏ dại, nhiễu nền đất/gỗ rời rạc nằm xung quanh rìa ảnh.
+
+    Args:
+        mask: Mặt nạ nhị phân 2 chiều kích thước `(H, W)`, kiểu `np.uint8`, giá trị `{0, 255}`.
+
+    Returns:
+        np.ndarray: Mặt nạ chỉ chứa thành phần liên thông lớn nhất, kích thước `(H, W)`, kiểu `np.uint8`.
+
+    Raises:
+        ValueError: Nếu `mask` không phải mảng 2 chiều.
+    """
+    if not isinstance(mask, np.ndarray) or mask.ndim != 2:
+        raise ValueError(
+            f"Mặt nạ đầu vào phải là mảng NumPy 2 chiều (H, W), nhận được: {getattr(mask, 'shape', type(mask))}."
+        )
+    H, W = mask.shape
+    binary = mask > 0
+    fg_rows, fg_cols = np.where(binary)
+    if fg_rows.size == 0:
+        return np.zeros((H, W), dtype=np.uint8)
+
+    grid = binary.tolist()
+    visited = [[False] * W for _ in range(H)]
+    directions = [
+        (-1, -1), (-1, 0), (-1, 1),
+        (0, -1),           (0, 1),
+        (1, -1),  (1, 0),  (1, 1),
+    ]
+
+    best_rows: List[int] = []
+    best_cols: List[int] = []
+
+    for start_r, start_c in zip(fg_rows.tolist(), fg_cols.tolist()):
+        if visited[start_r][start_c]:
+            continue
+        visited[start_r][start_c] = True
+        queue = deque([(start_r, start_c)])
+        comp_rows: List[int] = []
+        comp_cols: List[int] = []
+
+        while queue:
+            r, c = queue.popleft()
+            comp_rows.append(r)
+            comp_cols.append(c)
+            for dr, dc in directions:
+                nr = r + dr
+                nc = c + dc
+                if 0 <= nr < H and 0 <= nc < W and grid[nr][nc] and not visited[nr][nc]:
+                    visited[nr][nc] = True
+                    queue.append((nr, nc))
+
+        if len(comp_rows) > len(best_rows):
+            best_rows = comp_rows
+            best_cols = comp_cols
+
+    out = np.zeros((H, W), dtype=np.uint8)
+    if best_rows:
+        out[best_rows, best_cols] = 255
+    return out
+
+
 def _draw_text_numpy(
     canvas: np.ndarray,
     text: str,

@@ -18,6 +18,11 @@ from PIL import Image
 import streamlit as st
 
 from src.data_io import matrix_to_csv_bytes
+from src.postprocess import (
+    closing_scratch,
+    fill_holes_bfs_scratch,
+    keep_largest_connected_component_scratch,
+)
 from src.benchmark import (
     compute_image_similarity_metrics,
     compute_segmentation_metrics_scratch,
@@ -25,6 +30,7 @@ from src.benchmark import (
     run_opencv_otsu,
 )
 from src.pipeline import (
+    build_pathology_feature_space,
     call_kmeans,
     call_load_image,
     call_otsu,
@@ -83,41 +89,71 @@ _STRETCH_KW: Dict[str, Any] = (
     {"width": "stretch"} if (_ST_MAJOR, _ST_MINOR) >= (1, 50) else {"use_container_width": True}
 )
 
-def create_sample_leaf_image() -> np.ndarray:
-    """Tạo nhanh ảnh mẫu lá cây có đốm bệnh ngay trên bộ nhớ để chạy thử tức thì."""
+def create_sample_leaf_image(preset: str = "halo") -> np.ndarray:
+    """Tạo nhanh ảnh mẫu lá cây thực địa giả lập ngay trên bộ nhớ để chạy thử tức thì.
+
+    Args:
+        preset:
+            - "halo": Mô phỏng Ảnh 1 (lá có các ổ bệnh gồm tâm nâu phân mảnh nằm trong quầng vàng lớn).
+            - "field": Mô phỏng Ảnh 2 (lá bóng nắng có nhiều đốm bệnh nhỏ < 3% & nền đất/gỗ nâu góc trái).
+    """
     H, W = 320, 320
     img = np.zeros((H, W, 3), dtype=np.uint8)
     yy, xx = np.ogrid[:H, :W]
 
-    # Nền sáng trung tính
-    img[:] = [238, 240, 238]
+    if preset == "field":
+        # Nền sáng ngoài trời kèm góc đất/gỗ nâu mờ ở góc trái
+        img[:] = [230, 232, 228]
+        soil_corner = (xx + 0.75 * yy) < 135
+        img[soil_corner] = [142, 102, 65]
+        wood_patch = (xx < 95) & (yy > 205)
+        img[wood_patch] = [160, 122, 78]
 
-    # Phiến lá hình elip nghiêng
-    leaf_mask = ((xx - 160) / 96.0) ** 2 + ((yy - 160) / 128.0) ** 2 <= 1.0
+        leaf_mask = ((xx - 175) / 92.0) ** 2 + ((yy - 160) / 122.0) ** 2 <= 1.0
+        img[leaf_mask] = [38, 138, 68]
+
+        # Vùng chói bóng nắng trên mặt lá (R, G, B cao nhưng G > R)
+        glare = (((xx - 165) / 36.0) ** 2 + ((yy - 108) / 26.0) ** 2 <= 1.0) & leaf_mask
+        img[glare] = [205, 228, 198]
+
+        # 6 đốm bệnh nhỏ màu vàng-nâu (< 3% diện tích lá)
+        small_spots = [
+            (142, 132, 5), (195, 118, 4), (218, 162, 5),
+            (158, 196, 5), (190, 212, 4), (132, 172, 4),
+        ]
+        for cx, cy, r in small_spots:
+            sp = ((xx - cx) ** 2 + (yy - cy) ** 2) <= r ** 2
+            img[sp & leaf_mask] = [168, 136, 42]
+            core = ((xx - cx) ** 2 + (yy - cy) ** 2) <= max(1, r - 2) ** 2
+            img[core & leaf_mask] = [115, 68, 28]
+        return img
+
+    # Preset "halo": Mô phỏng Ảnh 1 - nhiều chấm nâu nằm trong quầng vàng lớn
+    img[:] = [238, 240, 238]
+    leaf_mask = ((xx - 160) / 98.0) ** 2 + ((yy - 160) / 128.0) ** 2 <= 1.0
     img[leaf_mask] = [42, 142, 74]
 
-    # Gân lá chính và gân phụ
     main_vein = (np.abs(xx - 160) <= 2) & leaf_mask
     img[main_vein] = [88, 185, 118]
     for offset_y in (-55, -15, 25, 65):
         side_vein = (np.abs((yy - (160 + offset_y)) - 0.35 * np.abs(xx - 160)) <= 1.5) & leaf_mask
         img[side_vein] = [78, 175, 108]
 
-    # Các đốm bệnh hoại tử với sắc nâu / vàng úa / đen
-    spots = [
-        (132, 118, 20, [139, 69, 19]),   # Ổ bệnh nâu sẫm lớn
-        (195, 185, 15, [184, 120, 32]),  # Ổ bệnh vàng nâu
-        (125, 205, 11, [160, 82, 45]),   # Ổ bệnh vừa
-        (182, 115, 8, [120, 55, 22]),    # Ổ bệnh nhỏ
-        (158, 232, 6, [150, 95, 25]),    # Ổ bệnh nhỏ
+    # 3 ổ bệnh lớn: mỗi ổ có quầng vàng (Chlorosis) bao quanh nhiều chấm nâu (Necrosis) sát nhau
+    halo_lesions = [
+        (126, 115, 24, [(-6, -5, 4), (5, -2, 4), (-2, 6, 5), (7, 5, 3)]),
+        (196, 178, 20, [(-5, -3, 4), (4, 3, 4), (0, -6, 3)]),
+        (134, 214, 16, [(-3, -2, 4), (4, 2, 3)]),
     ]
-    for cx, cy, r, color in spots:
-        spot_mask = ((xx - cx) ** 2 + (yy - cy) ** 2) <= r ** 2
-        img[spot_mask & leaf_mask] = color
+    for cx, cy, hr, dots in halo_lesions:
+        halo_outer = (((xx - cx) ** 2 + (yy - cy) ** 2) <= hr ** 2) & leaf_mask
+        img[halo_outer] = [196, 198, 52]  # Quầng vàng tươi
+        for dx, dy, dr in dots:
+            dot = (((xx - (cx + dx)) ** 2 + (yy - (cy + dy)) ** 2) <= dr ** 2) & leaf_mask
+            img[dot] = [102, 54, 22]  # Tâm nâu hoại tử
 
-    # Nhiễu hạt nhỏ (sẽ bị lọc bỏ bởi Morphology + min_area)
+    # Nhiễu hạt nhỏ 2x2
     img[75:77, 155:157] = [145, 75, 25]
-    img[225:227, 175:177] = [145, 75, 25]
     return img
 
 
@@ -194,7 +230,7 @@ def build_metrics_dataframe(metrics: Dict[str, float], time_scratch_ms: float, t
 st.markdown('<div class="main-header">🍃 Hệ Thống Chẩn Đoán Sức Khỏe Lá Cây Tự Động</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="sub-header">'
-    'Phân đoạn đa tầng: <b>Otsu (Kênh Saturation) + K-Means Vectorized + Hình thái học & BFS Đếm Ổ Bệnh</b> '
+    'Phân đoạn đa tầng: <b>Otsu (Vegetation Map ExG×S + Lấp lỗ BFS) + K-Means Đặc trưng bệnh học + Hình thái học & BFS Đếm Ổ Bệnh</b> '
     '— Cài đặt 100% From Scratch bằng NumPy & Đối sánh định lượng OpenCV'
     '</div>',
     unsafe_allow_html=True,
@@ -227,8 +263,16 @@ input_source_type = st.sidebar.radio(
 
 raw_input_source: Any = None
 if input_source_type == "Tạo nhanh ảnh mẫu lá cây có đốm bệnh (In-Memory)":
-    raw_input_source = create_sample_leaf_image()
-    st.sidebar.success("Đã tạo mẫu ảnh lá cây giả lập (320x320 RGB) chứa 5 ổ bệnh & nhiễu hạt.")
+    sample_preset = st.sidebar.selectbox(
+        "Chọn kịch bản ảnh mẫu:",
+        [
+            "Mẫu 1: Đốm tâm nâu & quầng vàng lớn (Chlorotic Halo)",
+            "Mẫu 2: Lá bóng nắng, đốm nhỏ (<3%) & nền đất nâu góc ảnh",
+        ],
+    )
+    preset_key = "halo" if sample_preset.startswith("Mẫu 1") else "field"
+    raw_input_source = create_sample_leaf_image(preset=preset_key)
+    st.sidebar.success(f"Đã tạo ảnh mẫu giả lập 320x320 ({preset_key}).")
 elif input_source_type == "Tải lên file ảnh (.png, .jpg, .jpeg)":
     uploaded_img = st.sidebar.file_uploader("Chọn ảnh lá cây:", type=["png", "jpg", "jpeg"])
     if uploaded_img is not None:
@@ -242,8 +286,16 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("🎛️ Tham số thuật toán")
 blur_kernel = st.sidebar.select_slider("Kích thước lọc mịn Gauss (Kernel):", options=[3, 5, 7, 9, 11], value=5)
 blur_sigma = st.sidebar.slider("Độ lệch chuẩn Gaussian (Sigma):", min_value=0.5, max_value=3.0, value=1.0, step=0.1)
-k_clusters = st.sidebar.slider("Số cụm K-Means (K):", min_value=2, max_value=6, value=3, step=1)
-morph_kernel = st.sidebar.select_slider("Kích thước kernel Hình thái học:", options=[3, 5, 7], value=3)
+k_clusters = st.sidebar.slider("Số cụm K-Means (K):", min_value=2, max_value=6, value=4, step=1)
+yellow_halo_sensitivity = st.sidebar.slider(
+    "Độ nhạy bao phủ quầng vàng (Yellow Halo Sensitivity):",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.65,
+    step=0.05,
+    help="Tăng để mở rộng vùng bắt quầng vàng xung quanh đốm bệnh và các đốm nhỏ; giảm để chỉ tập trung vào tâm hoại tử nâu.",
+)
+morph_kernel = st.sidebar.select_slider("Kích thước kernel Hình thái học (Closing):", options=[3, 5, 7, 9], value=5)
 min_lesion_area = st.sidebar.slider("Diện tích ổ bệnh tối thiểu (min_area px):", min_value=5, max_value=200, value=20, step=5)
 run_benchmark = st.sidebar.checkbox("Bật đối sánh định lượng với OpenCV", value=True)
 
@@ -264,6 +316,7 @@ if app_mode.startswith("1."):
             blur_sigma=blur_sigma,
             min_lesion_area=min_lesion_area,
             morph_kernel=morph_kernel,
+            yellow_halo_sensitivity=yellow_halo_sensitivity,
             run_benchmark_comparison=run_benchmark,
         )
 
@@ -333,11 +386,11 @@ if app_mode.startswith("1."):
     with s1:
         st.image(result["original_rgb"], caption=f"1. Ảnh gốc RGB {result['original_rgb'].shape}", **_STRETCH_KW)
     with s2:
-        st.image(result["otsu_channel"], caption="2. Kênh Saturation (hoặc Gray) sau Gauss Blur", **_STRETCH_KW)
+        st.image(result["otsu_channel"], caption="2. Bản đồ Thực vật (ExG × Saturation)", **_STRETCH_KW)
     with s3:
         st.image(
             result["leaf_mask"],
-            caption=f"3. Mặt nạ Phiến lá Otsu (T* = {result['otsu_result']['threshold']})",
+            caption=f"3. Leaf ROI Otsu (T* = {result['otsu_result']['threshold']}) + Lấp lỗ BFS",
             **_STRETCH_KW,
         )
 
@@ -345,15 +398,19 @@ if app_mode.startswith("1."):
     with s4:
         st.image(
             result["kmeans_result"]["segmented_img"],
-            caption=f"4. Phân cụm K-Means (k={k_clusters}, {result['kmeans_result']['n_iter']} vòng lặp)",
+            caption=f"4. Phân cụm K-Means Đặc trưng bệnh học (k={k_clusters}, {result['kmeans_result']['n_iter']} vòng lặp)",
             **_STRETCH_KW,
         )
     with s5:
-        st.image(result["color_result"]["disease_mask"], caption="5. Mặt nạ Bệnh thô (Color Clustering)", **_STRETCH_KW)
+        st.image(
+            result["color_result"]["disease_mask"],
+            caption=f"5. Mặt nạ Bệnh thô (Tâm nâu + Quầng vàng, nhạy={yellow_halo_sensitivity:.2f})",
+            **_STRETCH_KW,
+        )
     with s6:
         st.image(
             result["postprocess_result"]["cleaned_mask"],
-            caption=f"6. Mặt nạ Bệnh sau Morphology & Lọc BFS (k={morph_kernel})",
+            caption=f"6. Mặt nạ Bệnh sau Closing (k={morph_kernel}) -> Opening & Lọc BFS",
             **_STRETCH_KW,
         )
 
@@ -420,10 +477,19 @@ elif app_mode.startswith("2."):
 
     channel_choice = st.radio(
         "Chọn kênh ảnh đưa vào thuật toán Otsu:",
-        ["Kênh Độ bão hòa Saturation (HSV-S) — Tối ưu tách lá khỏi nền", "Kênh Mức xám Grayscale"],
+        [
+            "Bản đồ Thực vật Vegetation Map (ExG × S) — Chống nhiễu nền đất nâu",
+            "Kênh Độ bão hòa Saturation (HSV-S)",
+            "Kênh Mức xám Grayscale",
+        ],
         horizontal=True,
     )
-    target_channel = prep["saturation"] if channel_choice.startswith("Kênh Độ") else prep["grayscale"]
+    if channel_choice.startswith("Bản đồ"):
+        target_channel = prep["vegetation_map"]
+    elif channel_choice.startswith("Kênh Độ"):
+        target_channel = prep["saturation"]
+    else:
+        target_channel = prep["grayscale"]
 
     otsu_scratch_res = call_otsu(target_channel, fallback_tracker=fb_tracker)
     otsu_cv_res = run_opencv_otsu(target_channel)
@@ -475,29 +541,44 @@ else:
     loaded = call_load_image(raw_input_source, max_size=512, fallback_tracker=fb_tracker)
     prep = call_preprocess(loaded, blur_kernel=blur_kernel, blur_sigma=blur_sigma, fallback_tracker=fb_tracker)
 
-    use_leaf_roi = st.checkbox("Chỉ phân cụm trong vùng phiến lá (Loại bỏ nền qua Otsu trước)", value=True)
+    use_leaf_roi = st.checkbox("Chỉ phân cụm trong vùng phiến lá (Loại nền nâu + Lấp lỗ BFS)", value=True)
+    use_pathology_space = st.checkbox("Dùng không gian đặc trưng nhạy bệnh học (RGB + R-G + NormRG + Hue)", value=True)
     roi_mask = None
     if use_leaf_roi:
         otsu_res = call_otsu(prep["otsu_input"], fallback_tracker=fb_tracker)
-        roi_mask = otsu_res["binary_mask"]
+        H, W = prep["grayscale"].shape
+        roi_close_k = 11 if min(H, W) >= 128 else 7
+        roi_mask = fill_holes_bfs_scratch(
+            keep_largest_connected_component_scratch(
+                closing_scratch(otsu_res["binary_mask"], kernel_size=roi_close_k)
+            )
+        )
 
+    km_input = (
+        build_pathology_feature_space(prep["blurred_rgb"], prep["hsv"])
+        if use_pathology_space
+        else prep["blurred_rgb"]
+    )
     km_scratch = call_kmeans(
-        prep["blurred_rgb"], k=k_clusters, max_iter=100, tol=1e-3, random_state=42, roi_mask=roi_mask, fallback_tracker=fb_tracker
+        km_input, k=k_clusters, max_iter=100, tol=1e-3, random_state=42, roi_mask=roi_mask, fallback_tracker=fb_tracker
     )
     km_cv = run_opencv_kmeans(
-        prep["blurred_rgb"], k=k_clusters, max_iter=100, tol=1e-3, roi_mask=roi_mask
+        km_input, k=k_clusters, max_iter=100, tol=1e-3, roi_mask=roi_mask
     )
-    sim_metrics = compute_image_similarity_metrics(km_scratch["segmented_img"], km_cv["segmented_img"])
+    seg_scratch_rgb = km_scratch["segmented_img"][:, :, :3].astype(np.uint8)
+    seg_cv_rgb = km_cv["segmented_img"][:, :, :3].astype(np.uint8)
+    centroids_rgb = km_scratch["centroids"][:, :3]
+    sim_metrics = compute_image_similarity_metrics(seg_scratch_rgb, seg_cv_rgb)
 
     k1, k2, k3 = st.columns(3)
     k1.image(prep["blurred_rgb"], caption="Ảnh RGB sau làm mịn Gauss", **_STRETCH_KW)
     k2.image(
-        km_scratch["segmented_img"],
+        seg_scratch_rgb,
         caption=f"K-Means Scratch (k={k_clusters}, {km_scratch['n_iter']} iter, {km_scratch['exec_time_ms']:.2f} ms)",
         **_STRETCH_KW,
     )
     k3.image(
-        km_cv["segmented_img"],
+        seg_cv_rgb,
         caption=f"K-Means OpenCV (k={k_clusters}, {km_cv['exec_time_ms']:.2f} ms)",
         **_STRETCH_KW,
     )
@@ -507,8 +588,8 @@ else:
     with km_col1:
         st.markdown("**Tọa độ tâm cụm RGB (Scratch Centroids):**")
         cent_df = pd.DataFrame(
-            np.round(km_scratch["centroids"], 1),
-            columns=[f"Kênh {i}" for i in range(km_scratch["centroids"].shape[1])],
+            np.round(centroids_rgb, 1),
+            columns=["R", "G", "B"],
         )
         cent_df.index.name = "Cluster ID"
         st.dataframe(cent_df, **_STRETCH_KW)

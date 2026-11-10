@@ -37,6 +37,8 @@ from src.postprocess import (
     dilate_scratch,
     draw_lesion_bboxes_scratch,
     erode_scratch,
+    fill_holes_bfs_scratch,
+    keep_largest_connected_component_scratch,
     opening_scratch,
 )
 from src.benchmark import (
@@ -519,3 +521,100 @@ def test_pipeline_integration_contract(synthetic_leaf_rgb: np.ndarray):
     assert 0 <= result["diagnosis"]["severity_level"] <= 4
     assert "otsu_metrics" in result["benchmark"]
     assert "kmeans_disease_metrics" in result["benchmark"]
+
+
+def test_postprocess_hole_filling_and_largest_component_contract():
+    """Kiểm tra hợp đồng fill_holes_bfs_scratch và keep_largest_connected_component_scratch."""
+    mask = np.zeros((80, 80), dtype=np.uint8)
+    # Thành phần lớn nhất (hình vuông 40x40 có lỗ thủng 10x10 ở giữa)
+    mask[20:60, 20:60] = 255
+    mask[35:45, 35:45] = 0
+    # Nhiễu nhỏ tách rời ở góc
+    mask[2:6, 2:6] = 255
+
+    largest = keep_largest_connected_component_scratch(mask)
+    assert largest[2, 2] == 0, "Nhiễu tách rời ở góc phải bị loại bỏ."
+    assert largest[25, 25] == 255, "Thành phần lá chính phải được giữ lại."
+
+    filled = fill_holes_bfs_scratch(largest)
+    assert filled[40, 40] == 255, "Lỗ thủng bên trong vùng lá phải được lấp đầy hoàn toàn bằng BFS."
+    assert filled[0, 0] == 0, "Nền ngoài rìa ảnh phải giữ nguyên giá trị 0."
+
+
+def test_pipeline_yellow_halo_unification_scenario():
+    """Kiểm thử Ảnh 1: Lá có đốm tâm nâu phân mảnh nằm trong quầng vàng lớn (Chlorotic Halo)."""
+    H, W = 240, 240
+    img = np.full((H, W, 3), [240, 240, 240], dtype=np.uint8)
+    yy, xx = np.ogrid[:H, :W]
+    leaf = ((xx - 120) / 80.0) ** 2 + ((yy - 120) / 95.0) ** 2 <= 1.0
+    img[leaf] = [40, 140, 70]
+
+    # 2 ổ bệnh riêng biệt, mỗi ổ gồm quầng vàng lớn + nhiều chấm nâu nhỏ sát nhau bên trong
+    lesions = [
+        (95, 95, 22, [(-5, -4, 3), (4, -3, 3), (-2, 5, 4), (5, 4, 3)]),
+        (150, 150, 18, [(-4, -3, 3), (4, 3, 3)]),
+    ]
+    for cx, cy, hr, dots in lesions:
+        img[(((xx - cx) ** 2 + (yy - cy) ** 2) <= hr ** 2) & leaf] = [198, 198, 52]
+        for dx, dy, dr in dots:
+            img[(((xx - (cx + dx)) ** 2 + (yy - (cy + dy)) ** 2) <= dr ** 2) & leaf] = [95, 50, 22]
+
+    res = run_full_diagnosis_pipeline(
+        file_source=img,
+        k_clusters=4,
+        blur_kernel=3,
+        min_lesion_area=20,
+        morph_kernel=5,
+        yellow_halo_sensitivity=0.65,
+        run_benchmark_comparison=False,
+    )
+    # Phải gom đúng 2 ổ bệnh hợp nhất (không bị xé vụn thành 6 hộp nhỏ)
+    assert res["postprocess_result"]["num_lesions"] == 2, (
+        f"Kỳ vọng gom thành 2 ổ bệnh thống nhất, thực tế: {res['postprocess_result']['num_lesions']}."
+    )
+    # Độ phủ bệnh phải bao gồm cả quầng vàng (diện tích > 1500 px)
+    assert res["diagnosis"]["disease_area_px"] > 1500, "Phải bắt được cả phần quầng vàng xung quanh tâm nâu."
+
+
+def test_pipeline_brown_soil_and_small_spots_scenario():
+    """Kiểm thử Ảnh 2: Nền đất/gỗ màu nâu ở góc + mặt lá bóng nắng + 6 đốm bệnh nhỏ (< 3% diện tích lá)."""
+    H, W = 260, 260
+    img = np.full((H, W, 3), [232, 234, 230], dtype=np.uint8)
+    yy, xx = np.ogrid[:H, :W]
+
+    # Nền đất/gỗ nâu mờ ở góc trái
+    img[(xx + 0.7 * yy) < 110] = [142, 102, 65]
+    img[(xx < 75) & (yy > 180)] = [160, 120, 75]
+
+    leaf = ((xx - 145) / 76.0) ** 2 + ((yy - 130) / 96.0) ** 2 <= 1.0
+    img[leaf] = [38, 138, 68]
+    # Vùng chói bóng nắng trên lá
+    glare = (((xx - 140) / 26.0) ** 2 + ((yy - 90) / 20.0) ** 2 <= 1.0) & leaf
+    img[glare] = [215, 232, 210]
+
+    # 6 đốm bệnh nhỏ vàng-nâu tách rời (< 3% diện tích lá)
+    small_spots = [
+        (115, 105, 5), (170, 95, 4), (185, 135, 5),
+        (130, 162, 5), (162, 178, 4), (108, 142, 4),
+    ]
+    for cx, cy, r in small_spots:
+        img[(((xx - cx) ** 2 + (yy - cy) ** 2) <= r ** 2) & leaf] = [168, 136, 42]
+        img[(((xx - cx) ** 2 + (yy - cy) ** 2) <= max(1, r - 2) ** 2) & leaf] = [115, 68, 28]
+
+    res = run_full_diagnosis_pipeline(
+        file_source=img,
+        k_clusters=4,
+        blur_kernel=3,
+        min_lesion_area=20,
+        morph_kernel=3,
+        yellow_halo_sensitivity=0.65,
+        run_benchmark_comparison=False,
+    )
+    # Kiểm tra nền đất nâu góc trái KHÔNG bị đưa vào leaf_mask
+    assert res["leaf_mask"][10, 10] == 0, "Nền đất màu nâu ở góc ảnh phải bị loại bỏ khỏi leaf_mask."
+    # Kiểm tra vùng bóng nắng không bị nhận nhầm là bệnh
+    assert res["postprocess_result"]["cleaned_mask"][90, 140] == 0, "Vùng bóng nắng trên lá không được nhận nhầm là bệnh."
+    # Kiểm tra phát hiện đầy đủ 6 đốm bệnh nhỏ
+    assert res["postprocess_result"]["num_lesions"] == 6, (
+        f"Kỳ vọng phát hiện 6 ổ bệnh nhỏ trên mặt lá bóng nắng, thực tế: {res['postprocess_result']['num_lesions']}."
+    )

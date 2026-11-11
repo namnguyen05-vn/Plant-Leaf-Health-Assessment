@@ -54,6 +54,7 @@ htmlcov/
 .streamlit/secrets.toml
 
 # Project data outputs (ignore outputs, keep folder structure via .gitkeep)
+/outputs/
 data/outputs/*
 !data/outputs/.gitkeep
 data/raw/*

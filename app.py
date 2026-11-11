@@ -55,42 +55,156 @@ st.markdown(
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
 
-    html, body, [class*="css"], .stApp {
+    :root, html, body, .stApp {
+        color-scheme: light !important;
+        --text-color: #0F172A;
+        --background-color: #F8FAFC;
+        --secondary-background-color: #FFFFFF;
         font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif !important;
-        color: #0F172A;
+        color: #0F172A !important;
     }
 
     /* Nền chính Slate 50 */
-    [data-testid="stAppViewContainer"], .stApp {
+    [data-testid="stAppViewContainer"],
+    [data-testid="stAppViewContainer"] > .main,
+    .stApp {
         background-color: #F8FAFC !important;
+        color: #0F172A !important;
     }
 
     /* Sidebar trắng + viền phải Slate 200 */
-    [data-testid="stSidebar"] {
+    [data-testid="stSidebar"],
+    [data-testid="stSidebar"] > div:first-child {
         background-color: #FFFFFF !important;
         border-right: 1px solid #E2E8F0 !important;
+        color: #0F172A !important;
     }
     [data-testid="stSidebar"] .block-container {
         padding-top: 1.25rem !important;
     }
 
-    /* Giảm khoảng trống trên cùng khu vực chính */
+    /* Giảm khoảng trống trên cùng & giữ icon thanh Header luôn rõ */
     .main .block-container {
         padding-top: 1.2rem !important;
         padding-bottom: 2rem !important;
         max-width: 1380px !important;
     }
     header[data-testid="stHeader"] {
-        background: transparent !important;
+        background: rgba(248, 250, 252, 0.88) !important;
+        backdrop-filter: blur(8px);
+    }
+    header[data-testid="stHeader"] button,
+    header[data-testid="stHeader"] svg {
+        color: #0F172A !important;
+        fill: #0F172A !important;
+    }
+
+    /* Ép tương phản rõ cho mọi văn bản, nhãn widget và chú thích ảnh */
+    [data-testid="stMarkdownContainer"] p,
+    [data-testid="stMarkdownContainer"] li,
+    [data-testid="stMarkdownContainer"] span,
+    [data-testid="stWidgetLabel"],
+    [data-testid="stWidgetLabel"] *,
+    [data-testid="stRadio"] label,
+    [data-testid="stRadio"] label *,
+    [data-testid="stCheckbox"] label,
+    [data-testid="stCheckbox"] label *,
+    [data-testid="stText"] {
+        color: #0F172A !important;
+    }
+    [data-testid="stCaptionContainer"],
+    [data-testid="stCaptionContainer"] *,
+    [data-testid="stImageCaption"],
+    [data-testid="stImageCaption"] * {
+        color: #475569 !important;
+        font-size: 0.83rem !important;
+        font-weight: 500 !important;
+    }
+
+    /* Selectbox & Popover Dropdowns */
+    [data-baseweb="select"] > div {
+        background-color: #FFFFFF !important;
+        border: 1px solid #CBD5E1 !important;
+        border-radius: 10px !important;
+        color: #0F172A !important;
+    }
+    [data-baseweb="select"] span,
+    [data-baseweb="select"] div,
+    [data-baseweb="select"] input,
+    [data-baseweb="select"] svg {
+        color: #0F172A !important;
+        fill: #0F172A !important;
+    }
+    [data-baseweb="popover"],
+    [data-baseweb="popover"] > div,
+    ul[role="listbox"] {
+        background-color: #FFFFFF !important;
+        border: 1px solid #E2E8F0 !important;
+        border-radius: 10px !important;
+        box-shadow: 0 10px 25px rgba(15, 23, 42, 0.10) !important;
+    }
+    ul[role="listbox"] li,
+    ul[role="listbox"] li * {
+        background-color: #FFFFFF !important;
+        color: #0F172A !important;
+    }
+    ul[role="listbox"] li:hover,
+    ul[role="listbox"] li:hover *,
+    ul[role="listbox"] li[aria-selected="true"],
+    ul[role="listbox"] li[aria-selected="true"] * {
+        background-color: #ECFDF5 !important;
+        color: #047857 !important;
+    }
+
+    /* Expander, Sliders & File Uploader */
+    [data-testid="stExpander"] {
+        background-color: #F8FAFC !important;
+        border: 1px solid #E2E8F0 !important;
+        border-radius: 12px !important;
+    }
+    [data-testid="stExpander"] summary,
+    [data-testid="stExpander"] summary *,
+    [data-testid="stExpander"] svg {
+        color: #0F172A !important;
+        fill: #0F172A !important;
+        font-weight: 600 !important;
+    }
+    [data-testid="stSlider"] [data-testid="stTickBarMin"],
+    [data-testid="stSlider"] [data-testid="stTickBarMax"],
+    [data-testid="stSlider"] [data-testid="stThumbValue"],
+    [data-testid="stSlider"] span {
+        color: #334155 !important;
+        font-weight: 600 !important;
+    }
+    [data-testid="stFileUploaderDropzone"] {
+        background-color: #F8FAFC !important;
+        border: 1.5px dashed #94A3B8 !important;
+        border-radius: 12px !important;
+        color: #0F172A !important;
+    }
+    [data-testid="stFileUploaderDropzoneInstructions"] span,
+    [data-testid="stFileUploaderDropzoneInstructions"] small,
+    [data-testid="stFileUploaderFileName"],
+    [data-testid="stFileUploaderFileData"] small {
+        color: #334155 !important;
+    }
+    [data-testid="stFileUploaderDropzone"] button,
+    [data-testid="stFileUploaderDropzone"] button * {
+        background-color: #FFFFFF !important;
+        color: #0F172A !important;
+        border-color: #CBD5E1 !important;
+        font-weight: 600 !important;
     }
 
     /* Figma Card Surface cho st.container(border=True) */
+    [class*="st-key-card_"],
     div[data-testid="stVerticalBlockBorderWrapper"] {
         background-color: #FFFFFF !important;
         border-radius: 14px !important;
         border: 1px solid #E2E8F0 !important;
         box-shadow: 0 4px 12px rgba(15, 23, 42, 0.04) !important;
         padding: 1rem 1.15rem !important;
+        color: #0F172A !important;
     }
 
     /* Pill / Segmented Control Tabs */
@@ -102,9 +216,9 @@ st.markdown(
         display: inline-flex !important;
         margin-bottom: 0.75rem !important;
     }
-    button[data-baseweb="tab"] {
+    button[data-baseweb="tab"],
+    button[data-baseweb="tab"] * {
         border-radius: 9px !important;
-        padding: 8px 18px !important;
         font-weight: 600 !important;
         font-size: 0.9rem !important;
         color: #475569 !important;
@@ -112,41 +226,60 @@ st.markdown(
         border: none !important;
         transition: all 0.15s ease !important;
     }
+    button[data-baseweb="tab"] {
+        padding: 8px 18px !important;
+    }
     button[data-baseweb="tab"][aria-selected="true"] {
         background-color: #FFFFFF !important;
-        color: #059669 !important;
         box-shadow: 0 2px 6px rgba(15, 23, 42, 0.06) !important;
+    }
+    button[data-baseweb="tab"][aria-selected="true"],
+    button[data-baseweb="tab"][aria-selected="true"] * {
+        color: #047857 !important;
     }
     div[data-baseweb="tab-highlight"], div[data-baseweb="tab-border"] {
         display: none !important;
     }
 
-    /* Nút bấm & Nút tải xuống */
+    /* Nút bấm & Nút tải xuống (đặt sau rule p để bảo vệ chữ trắng) */
     div.stButton > button {
         border-radius: 10px !important;
         font-weight: 600 !important;
         border: 1px solid #CBD5E1 !important;
         background-color: #FFFFFF !important;
-        color: #0F172A !important;
         transition: all 0.15s ease !important;
+    }
+    div.stButton > button,
+    div.stButton > button * {
+        color: #0F172A !important;
     }
     div.stButton > button:hover {
         border-color: #059669 !important;
-        color: #059669 !important;
         background-color: #ECFDF5 !important;
+    }
+    div.stButton > button:hover,
+    div.stButton > button:hover * {
+        color: #047857 !important;
     }
     div.stDownloadButton > button {
         border-radius: 10px !important;
         font-weight: 600 !important;
         background-color: #059669 !important;
-        color: #FFFFFF !important;
         border: 1px solid #059669 !important;
         box-shadow: 0 2px 6px rgba(5, 150, 105, 0.18) !important;
         transition: all 0.15s ease !important;
     }
+    div.stDownloadButton > button,
+    div.stDownloadButton > button * {
+        color: #FFFFFF !important;
+    }
     div.stDownloadButton > button:hover {
         background-color: #047857 !important;
         border-color: #047857 !important;
+    }
+    div.stDownloadButton > button:hover,
+    div.stDownloadButton > button:hover * {
+        color: #FFFFFF !important;
     }
 
     /* Sidebar Brand Logo */
@@ -167,21 +300,21 @@ st.markdown(
         align-items: center;
         justify-content: center;
         font-size: 20px;
-        color: #FFFFFF;
+        color: #FFFFFF !important;
         flex-shrink: 0;
         box-shadow: 0 4px 10px rgba(5, 150, 105, 0.22);
     }
     .brand-title {
         font-size: 1.15rem;
         font-weight: 800;
-        color: #0F172A;
+        color: #0F172A !important;
         line-height: 1.15;
         letter-spacing: -0.02em;
     }
     .brand-sub {
         font-size: 0.74rem;
         font-weight: 500;
-        color: #64748B;
+        color: #475569 !important;
         margin-top: 2px;
     }
 
@@ -191,14 +324,14 @@ st.markdown(
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.06em;
-        color: #64748B;
+        color: #475569 !important;
         margin: 12px 0 6px 0;
     }
 
     /* Hero Diagnostic Banner */
     .hero-banner {
-        background: #FFFFFF;
-        border: 1px solid #E2E8F0;
+        background: #FFFFFF !important;
+        border: 1px solid #E2E8F0 !important;
         border-radius: 14px;
         padding: 18px 22px;
         box-shadow: 0 4px 12px rgba(15, 23, 42, 0.04);
@@ -212,7 +345,7 @@ st.markdown(
     .hero-meta-title {
         font-size: 1.25rem;
         font-weight: 800;
-        color: #0F172A;
+        color: #0F172A !important;
         letter-spacing: -0.02em;
         margin-bottom: 6px;
     }
@@ -221,15 +354,17 @@ st.markdown(
         gap: 10px;
         flex-wrap: wrap;
         font-size: 0.82rem;
-        color: #475569;
+        color: #334155 !important;
         font-weight: 500;
     }
     .meta-chip {
-        background: #F1F5F9;
+        background: #F1F5F9 !important;
+        color: #1E293B !important;
         padding: 4px 10px;
         border-radius: 8px;
-        border: 1px solid #E2E8F0;
+        border: 1px solid #CBD5E1;
     }
+    .meta-chip b { color: #0F172A !important; }
     .hero-right {
         min-width: 280px;
         flex: 0 0 auto;
@@ -248,11 +383,11 @@ st.markdown(
         gap: 6px;
     }
     /* Bảng màu 5 cấp độ chuẩn Figma */
-    .sev-0 { background-color: #DCFCE7; color: #166534; border: 1px solid #86EFAC; }
-    .sev-1 { background-color: #FEF9C3; color: #854D0E; border: 1px solid #FDE047; }
-    .sev-2 { background-color: #FFEDD5; color: #9A3412; border: 1px solid #FDBA74; }
-    .sev-3 { background-color: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; }
-    .sev-4 { background-color: #F3E8FF; color: #6B21A8; border: 1px solid #D8B4FE; }
+    .sev-0 { background-color: #DCFCE7 !important; color: #166534 !important; border: 1px solid #86EFAC !important; }
+    .sev-1 { background-color: #FEF9C3 !important; color: #854D0E !important; border: 1px solid #FDE047 !important; }
+    .sev-2 { background-color: #FFEDD5 !important; color: #9A3412 !important; border: 1px solid #FDBA74 !important; }
+    .sev-3 { background-color: #FEE2E2 !important; color: #991B1B !important; border: 1px solid #FCA5A5 !important; }
+    .sev-4 { background-color: #F3E8FF !important; color: #6B21A8 !important; border: 1px solid #D8B4FE !important; }
 
     .prog-wrap {
         width: 100%;
@@ -261,9 +396,9 @@ st.markdown(
     .prog-header {
         display: flex;
         justify-content: space-between;
-        font-size: 0.76rem;
+        font-size: 0.78rem;
         font-weight: 600;
-        color: #475569;
+        color: #334155 !important;
         margin-bottom: 4px;
     }
     .prog-track {
@@ -281,8 +416,8 @@ st.markdown(
 
     /* 4-Column KPI Metric Card */
     .kpi-card {
-        background: #FFFFFF;
-        border: 1px solid #E2E8F0;
+        background: #FFFFFF !important;
+        border: 1px solid #E2E8F0 !important;
         border-radius: 14px;
         padding: 16px 18px;
         box-shadow: 0 4px 12px rgba(15, 23, 42, 0.04);
@@ -291,20 +426,20 @@ st.markdown(
     .kpi-label {
         font-size: 0.8rem;
         font-weight: 600;
-        color: #64748B;
+        color: #475569 !important;
         margin-bottom: 6px;
     }
     .kpi-value {
         font-size: 28px;
         font-weight: 800;
-        color: #0F172A;
+        color: #0F172A !important;
         line-height: 1.15;
         letter-spacing: -0.02em;
     }
     .kpi-sub {
         font-size: 0.78rem;
-        font-weight: 500;
-        color: #059669;
+        font-weight: 600;
+        color: #047857 !important;
         margin-top: 6px;
     }
 
@@ -312,16 +447,16 @@ st.markdown(
     .card-title {
         font-size: 0.96rem;
         font-weight: 700;
-        color: #0F172A;
+        color: #0F172A !important;
         margin-bottom: 10px;
         display: flex;
         align-items: center;
         gap: 6px;
     }
     .clinical-box {
-        background: #FFFFFF;
-        border: 1px solid #E2E8F0;
-        border-left: 5px solid #059669;
+        background: #FFFFFF !important;
+        border: 1px solid #E2E8F0 !important;
+        border-left: 5px solid #059669 !important;
         border-radius: 14px;
         padding: 14px 18px;
         box-shadow: 0 4px 12px rgba(15, 23, 42, 0.04);
@@ -330,19 +465,19 @@ st.markdown(
     .clinical-title {
         font-size: 0.92rem;
         font-weight: 700;
-        color: #0F172A;
+        color: #0F172A !important;
         margin-bottom: 4px;
     }
     .clinical-text {
         font-size: 0.88rem;
-        color: #334155;
+        color: #1E293B !important;
         line-height: 1.5;
     }
 
     /* Module Status Footer */
     .status-footer {
-        background: #F8FAFC;
-        border: 1px solid #E2E8F0;
+        background: #F8FAFC !important;
+        border: 1px solid #E2E8F0 !important;
         border-radius: 12px;
         padding: 10px 12px;
         margin-top: 12px;
@@ -353,10 +488,28 @@ st.markdown(
         align-items: center;
         font-size: 0.76rem;
         padding: 3px 0;
-        color: #334155;
+        color: #1E293B !important;
     }
-    .dot-ok { color: #059669; font-weight: 700; }
-    .dot-fb { color: #D97706; font-weight: 700; }
+    .status-row code {
+        background-color: #E2E8F0 !important;
+        color: #0F172A !important;
+        padding: 2px 6px !important;
+        border-radius: 5px !important;
+        font-weight: 600 !important;
+        font-size: 0.73rem !important;
+    }
+    .dot-ok { color: #047857 !important; font-weight: 700 !important; }
+    .dot-fb { color: #B45309 !important; font-weight: 700 !important; }
+
+    /* Đảm bảo st.info / st.warning luôn có chữ tối dễ đọc */
+    [data-testid="stAlert"] {
+        background-color: #EFF6FF !important;
+        border: 1px solid #BFDBFE !important;
+        border-radius: 12px !important;
+    }
+    [data-testid="stAlert"] * {
+        color: #0F172A !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -800,11 +953,11 @@ if analysis_mode == "Chẩn đoán Đa tầng (Full Pipeline)":
     with tab_diag:
         col_left, col_right = st.columns(2)
         with col_left:
-            with st.container(border=True):
+            with st.container(border=True, key="card_t1_orig"):
                 st.markdown('<div class="card-title">🖼️ Ảnh gốc ban đầu (Original Image)</div>', unsafe_allow_html=True)
                 st.image(result["original_rgb"], **_STRETCH_KW)
         with col_right:
-            with st.container(border=True):
+            with st.container(border=True, key="card_t1_annot"):
                 st.markdown(
                     '<div class="card-title">🎯 Kết quả Chẩn đoán &amp; Khoanh vùng (Annotated Diagnosis Output)</div>',
                     unsafe_allow_html=True,
@@ -841,11 +994,11 @@ if analysis_mode == "Chẩn đoán Đa tầng (Full Pipeline)":
     with tab_stages:
         st_c1, st_c2, st_c3, st_c4 = st.columns(4)
         with st_c1:
-            with st.container(border=True):
+            with st.container(border=True, key="card_t2_s1"):
                 st.markdown('<div class="card-title">1️⃣ Otsu ROI (Tách lá)</div>', unsafe_allow_html=True)
                 st.image(result["leaf_mask"], caption=f"T* = {result['otsu_result']['threshold']} + Lấp lỗ BFS", **_STRETCH_KW)
         with st_c2:
-            with st.container(border=True):
+            with st.container(border=True, key="card_t2_s2"):
                 st.markdown('<div class="card-title">2️⃣ Phân cụm K-means</div>', unsafe_allow_html=True)
                 st.image(
                     result["kmeans_result"]["segmented_img"],
@@ -853,7 +1006,7 @@ if analysis_mode == "Chẩn đoán Đa tầng (Full Pipeline)":
                     **_STRETCH_KW,
                 )
         with st_c3:
-            with st.container(border=True):
+            with st.container(border=True, key="card_t2_s3"):
                 st.markdown('<div class="card-title">3️⃣ Hình thái học</div>', unsafe_allow_html=True)
                 st.image(
                     result["morphed_disease_mask"],
@@ -861,7 +1014,7 @@ if analysis_mode == "Chẩn đoán Đa tầng (Full Pipeline)":
                     **_STRETCH_KW,
                 )
         with st_c4:
-            with st.container(border=True):
+            with st.container(border=True, key="card_t2_s4"):
                 st.markdown('<div class="card-title">4️⃣ Liên thông BFS</div>', unsafe_allow_html=True)
                 st.image(
                     annotated_overlay,
@@ -869,7 +1022,7 @@ if analysis_mode == "Chẩn đoán Đa tầng (Full Pipeline)":
                     **_STRETCH_KW,
                 )
 
-        with st.container(border=True):
+        with st.container(border=True, key="card_t2_table"):
             st.markdown('<div class="card-title">📋 Danh sách tọa độ &amp; Diện tích từng ổ bệnh</div>', unsafe_allow_html=True)
             bboxes = result["postprocess_result"]["bboxes"]
             if bboxes:
@@ -921,21 +1074,21 @@ if analysis_mode == "Chẩn đoán Đa tầng (Full Pipeline)":
 
         b1, b2, b3 = st.columns(3)
         with b1:
-            with st.container(border=True):
+            with st.container(border=True, key="card_t3_scratch"):
                 st.markdown(f'<div class="card-title">🧪 Tự code (NumPy): {t_lbl_s}</div>', unsafe_allow_html=True)
                 st.image(result["kmeans_result"]["segmented_img"] if not cmp_target.startswith("Tầng 1") else mask_s, **_STRETCH_KW)
         with b2:
-            with st.container(border=True):
+            with st.container(border=True, key="card_t3_opencv"):
                 st.markdown(f'<div class="card-title">⚙️ Thư viện OpenCV: {t_lbl_c}</div>', unsafe_allow_html=True)
                 st.image(mask_c, **_STRETCH_KW)
         with b3:
-            with st.container(border=True):
+            with st.container(border=True, key="card_t3_diff"):
                 st.markdown('<div class="card-title">🔥 Bản đồ sai khác (Difference Heatmap)</div>', unsafe_allow_html=True)
                 st.image(diff_vis, **_STRETCH_KW)
 
         ch_col, tbl_col = st.columns([1.45, 1])
         with ch_col:
-            with st.container(border=True):
+            with st.container(border=True, key="card_t3_chart"):
                 fig = plot_figma_otsu_chart(
                     result["otsu_result"]["histogram"],
                     result["otsu_result"]["variance_curve"],
@@ -945,7 +1098,7 @@ if analysis_mode == "Chẩn đoán Đa tầng (Full Pipeline)":
                 st.pyplot(fig, **_STRETCH_KW)
                 plt.close(fig)
         with tbl_col:
-            with st.container(border=True):
+            with st.container(border=True, key="card_t3_table"):
                 st.markdown('<div class="card-title">📊 Bảng Tổng hợp Chỉ số Định lượng</div>', unsafe_allow_html=True)
                 st.dataframe(render_metrics_summary_df(m_data, t_s, t_c), **_STRETCH_KW, hide_index=True)
 
@@ -957,7 +1110,7 @@ elif analysis_mode == "Chuyên sâu Otsu (Scratch vs OpenCV)":
     fb_local: List[str] = []
     prep = call_preprocess(result["original_rgb"], blur_kernel=blur_ksize, blur_sigma=blur_sigma, fallback_tracker=fb_local)
 
-    with st.container(border=True):
+    with st.container(border=True, key="card_m2_opts"):
         otsu_ch = st.radio(
             "Kênh đặc trưng đưa vào Otsu:",
             ["Vegetation Map (ExG × S)", "Saturation (HSV-S)", "Grayscale"],
@@ -986,28 +1139,28 @@ elif analysis_mode == "Chuyên sâu Otsu (Scratch vs OpenCV)":
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        with st.container(border=True):
+        with st.container(border=True, key="card_m2_scratch"):
             st.markdown('<div class="card-title">🧪 Mặt nạ Otsu Scratch (NumPy)</div>', unsafe_allow_html=True)
             st.image(otsu_s["binary_mask"], caption=f"T* = {otsu_s['threshold']} ({otsu_s['exec_time_ms']:.2f} ms)", **_STRETCH_KW)
     with c2:
-        with st.container(border=True):
+        with st.container(border=True, key="card_m2_opencv"):
             st.markdown('<div class="card-title">⚙️ Mặt nạ Otsu OpenCV</div>', unsafe_allow_html=True)
             st.image(otsu_c["binary_mask"], caption=f"T* = {otsu_c['threshold']} ({otsu_c['exec_time_ms']:.2f} ms)", **_STRETCH_KW)
     with c3:
-        with st.container(border=True):
+        with st.container(border=True, key="card_m2_diff"):
             st.markdown('<div class="card-title">🔥 Bản đồ sai khác (Diff Map)</div>', unsafe_allow_html=True)
             st.image(diff_map, caption="Xanh: Khớp | Đỏ: Chỉ Scratch | Lam: Chỉ OpenCV", **_STRETCH_KW)
 
     ch_col, tbl_col = st.columns([1.45, 1])
     with ch_col:
-        with st.container(border=True):
+        with st.container(border=True, key="card_m2_chart"):
             fig = plot_figma_otsu_chart(
                 otsu_s["histogram"], otsu_s["variance_curve"], otsu_s["threshold"], otsu_c["threshold"]
             )
             st.pyplot(fig, **_STRETCH_KW)
             plt.close(fig)
     with tbl_col:
-        with st.container(border=True):
+        with st.container(border=True, key="card_m2_table"):
             st.markdown('<div class="card-title">📊 Bảng Chỉ số Đối sánh Otsu</div>', unsafe_allow_html=True)
             st.dataframe(render_metrics_summary_df(otsu_m, otsu_s["exec_time_ms"], otsu_c["exec_time_ms"]), **_STRETCH_KW, hide_index=True)
 
@@ -1017,7 +1170,7 @@ elif analysis_mode == "Chuyên sâu Otsu (Scratch vs OpenCV)":
 # =============================================================================
 else:
     fb_local = []
-    with st.container(border=True):
+    with st.container(border=True, key="card_m3_opts"):
         opt_c1, opt_c2 = st.columns(2)
         with opt_c1:
             use_roi = st.checkbox("Chỉ phân cụm trong vùng Leaf ROI (Lấp lỗ BFS)", value=True)
@@ -1047,27 +1200,27 @@ else:
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        with st.container(border=True):
+        with st.container(border=True, key="card_m3_scratch"):
             st.markdown('<div class="card-title">🧪 K-means Scratch (NumPy)</div>', unsafe_allow_html=True)
             st.image(seg_s, caption=f"{km_s['n_iter']} iter | {km_s['exec_time_ms']:.2f} ms", **_STRETCH_KW)
     with c2:
-        with st.container(border=True):
+        with st.container(border=True, key="card_m3_opencv"):
             st.markdown('<div class="card-title">⚙️ K-means OpenCV</div>', unsafe_allow_html=True)
             st.image(seg_c, caption=f"cv2.kmeans | {km_c['exec_time_ms']:.2f} ms", **_STRETCH_KW)
     with c3:
-        with st.container(border=True):
+        with st.container(border=True, key="card_m3_diff"):
             st.markdown('<div class="card-title">🔥 Bản đồ nhiệt sai khác</div>', unsafe_allow_html=True)
             st.image(diff_heat, caption="Magma Heatmap (|Scratch - OpenCV|)", **_STRETCH_KW)
 
     t_col1, t_col2 = st.columns(2)
     with t_col1:
-        with st.container(border=True):
+        with st.container(border=True, key="card_m3_centroids"):
             st.markdown('<div class="card-title">🎨 Tọa độ Tâm cụm RGB (Scratch Centroids)</div>', unsafe_allow_html=True)
             cent_df = pd.DataFrame(np.round(km_s["centroids"][:, :3], 1), columns=["R", "G", "B"])
             cent_df.insert(0, "Cluster", [f"Cụm {i}" for i in range(len(cent_df))])
             st.dataframe(cent_df, **_STRETCH_KW, hide_index=True)
     with t_col2:
-        with st.container(border=True):
+        with st.container(border=True, key="card_m3_table"):
             st.markdown('<div class="card-title">📊 Chỉ số Đối sánh K-means</div>', unsafe_allow_html=True)
             km_table = pd.DataFrame(
                 [

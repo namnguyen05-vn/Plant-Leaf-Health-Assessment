@@ -38,6 +38,8 @@ from src.postprocess import (
     draw_lesion_bboxes_scratch,
     erode_scratch,
     fill_holes_bfs_scratch,
+    fill_small_holes_bfs_scratch,
+    filter_margin_noise_components_scratch,
     keep_largest_connected_component_scratch,
     opening_scratch,
 )
@@ -617,4 +619,123 @@ def test_pipeline_brown_soil_and_small_spots_scenario():
     # Kiểm tra phát hiện đầy đủ 6 đốm bệnh nhỏ
     assert res["postprocess_result"]["num_lesions"] == 6, (
         f"Kỳ vọng phát hiện 6 ổ bệnh nhỏ trên mặt lá bóng nắng, thực tế: {res['postprocess_result']['num_lesions']}."
+    )
+
+
+def test_postprocess_margin_filter_contract():
+    """Kiểm tra lọc nhiễu viền mép bằng filter_margin_noise_components_scratch."""
+    inner_mask = np.zeros((100, 100), dtype=np.uint8)
+    inner_mask[20:80, 20:80] = 255
+
+    lesion_mask = np.zeros((100, 100), dtype=np.uint8)
+    # Ổ bệnh thật nằm sâu trong lá (diện tích 100 px)
+    lesion_mask[40:50, 40:50] = 255
+    # Dải nhiễu dài bám ngoài rìa mép (diện tích 40 px >= min_area=20, nhưng ngoài inner_mask)
+    lesion_mask[15:17, 30:50] = 255
+
+    res = filter_margin_noise_components_scratch(lesion_mask, inner_mask, min_area=20, min_inner_ratio=0.40)
+    assert res["num_lesions"] == 1, f"Nhiễu bám rìa ngoài mép phải bị loại sạch, thực tế: {res['num_lesions']}."
+    assert res["cleaned_mask"][15, 35] == 0
+    assert res["cleaned_mask"][45, 45] == 255
+
+
+def test_pipeline_yellow_brown_border_and_bleached_serrated_scenario():
+    """Kiểm thử Ảnh 3: Phông nền vàng-nâu chạm 4 cạnh, lá răng cưa nhiễu mép, và ổ bệnh tâm bạc màu."""
+    H, W = 280, 280
+    # Phông nền vàng rực + góc nâu chạm cả 4 cạnh khung hình
+    img = np.full((H, W, 3), [215, 192, 48], dtype=np.uint8)
+    yy, xx = np.ogrid[:H, :W]
+    img[(xx + yy) < 200] = [165, 118, 65]
+
+    # Lá cây có mép răng cưa ở trung tâm
+    angle = np.arctan2(yy - 140.0, xx - 140.0)
+    r_serr = 1.0 + 0.06 * np.sin(24.0 * angle)
+    leaf = (((xx - 140.0) / (82.0 * r_serr)) ** 2 + ((yy - 140.0) / (100.0 * r_serr)) ** 2) <= 1.0
+    img[leaf] = [38, 138, 65]
+
+    # Giả lập dải nhiễu pha trộn màu ở mép lá (vùng răng cưa sát viền)
+    edge_band = leaf & (
+        (((xx - 140.0) / (78.0 * r_serr)) ** 2 + ((yy - 140.0) / (96.0 * r_serr)) ** 2) > 1.0
+    )
+    img[edge_band] = [125, 118, 68]
+
+    # 2 ổ bệnh có viền nâu mỏng và tâm khô trắng/bạc màu (như ổ bệnh #29, #24)
+    for cx, cy, r_out, r_in in [(120, 115, 16, 10), (165, 168, 14, 9)]:
+        ring = (((xx - cx) ** 2 + (yy - cy) ** 2) <= r_out ** 2) & leaf
+        core = (((xx - cx) ** 2 + (yy - cy) ** 2) <= r_in ** 2) & leaf
+        img[ring] = [122, 65, 28]
+        img[core] = [235, 228, 215]
+
+    res = run_full_diagnosis_pipeline(
+        file_source=img,
+        k_clusters=4,
+        blur_kernel=3,
+        min_lesion_area=20,
+        morph_kernel=5,
+        yellow_halo_sensitivity=0.65,
+        run_benchmark_comparison=False,
+    )
+
+    # 1. Phông nền vàng/nâu chạm 4 viền KHÔNG được tràn vào leaf_mask
+    assert np.all(res["leaf_mask"][0, :] == 0) and np.all(res["leaf_mask"][-1, :] == 0), (
+        "leaf_mask không được tràn ra viền trên/dưới phông nền vàng-nâu."
+    )
+    assert np.all(res["leaf_mask"][:, 0] == 0) and np.all(res["leaf_mask"][:, -1] == 0), (
+        "leaf_mask không được tràn ra viền trái/phải phông nền vàng-nâu."
+    )
+
+    # 2. Phải phát hiện đúng 2 ổ bệnh thật (không bị hàng chục BBox nhiễu dọc mép răng cưa)
+    assert res["postprocess_result"]["num_lesions"] == 2, (
+        f"Kỳ vọng đúng 2 ổ bệnh tâm bạc màu (loại sạch nhiễu mép), thực tế: {res['postprocess_result']['num_lesions']}."
+    )
+
+    # 3. Tâm bạc màu bên trong cả 2 ổ bệnh phải được lấp đầy hoàn toàn
+    cleaned = res["postprocess_result"]["cleaned_mask"]
+    assert cleaned[115, 120] == 255, "Tâm bạc màu của ổ bệnh 1 phải được bắt trọn / lấp đầy."
+    assert cleaned[168, 165] == 255, "Tâm bạc màu của ổ bệnh 2 phải được bắt trọn / lấp đầy."
+
+
+def test_postprocess_small_hole_filling_cap_contract():
+    """Kiểm tra fill_small_holes_bfs_scratch chỉ lấp lỗ nhỏ <= max_hole_area, không tràn vòng lớn."""
+    mask = np.zeros((100, 100), dtype=np.uint8)
+    # Vòng khép kín lớn bao quanh vùng ruột 30x30 (= 900 px > max_hole_area=120)
+    mask[10:44, 10:44] = 255
+    mask[12:42, 12:42] = 0
+    # Ổ bệnh nhỏ có lỗ rỗng 6x6 (= 36 px <= max_hole_area=120)
+    mask[60:80, 60:80] = 255
+    mask[67:73, 67:73] = 0
+
+    filled = fill_small_holes_bfs_scratch(mask, max_hole_area=120)
+    assert filled[25, 25] == 0, "Lỗ rỗng lớn (> max_hole_area) không được bị lấp tràn."
+    assert filled[70, 70] == 255, "Lỗ nhỏ (<= max_hole_area) phải được lấp đầy."
+
+
+def test_pipeline_olive_healthy_petiole_and_tiny_spots_adaptive_contract():
+    """Kiểm tra lá xanh ô-liu khỏe có cuống mảnh (=0%) và lá 256x256 có đốm nhỏ tự co giãn tham số."""
+    H, W = 256, 256
+    yy, xx = np.ogrid[:H, :W]
+
+    # 1. Lá khỏe màu xanh ô-liu (R/G ~ 0.87, từng bị ngưỡng tĩnh 0.82 đánh nhầm bệnh) + cuống lá 5px
+    healthy_img = np.full((H, W, 3), [170, 165, 172], dtype=np.uint8)
+    blade = ((xx - 128) / 58.0) ** 2 + ((yy - 115) / 68.0) ** 2 <= 1.0
+    stem = (np.abs(xx - 128) <= 2) & (yy >= 180) & (yy <= 230)
+    healthy_img[blade] = [92, 106, 62]
+    healthy_img[stem] = [88, 98, 56]
+
+    res_h = run_full_diagnosis_pipeline(file_source=healthy_img, run_benchmark_comparison=False)
+    assert res_h["diagnosis"]["severity_level"] == 0, (
+        f"Lá xanh ô-liu khỏe phải ở Cấp độ 0, thực tế: {res_h['diagnosis']}"
+    )
+    assert res_h["diagnosis"]["disease_ratio_percent"] < 1.0
+    assert res_h["leaf_mask"][215, 128] == 0, "Cuống lá mảnh phải được tách bỏ khỏi leaf_mask."
+
+    # 2. Lá 256x256 có 2 đốm bệnh siêu nhỏ (~3x3 / r=2px) cần blur=3 & min_area~8
+    spotted_img = healthy_img.copy()
+    spotted_img[stem] = [170, 165, 172]
+    for cx, cy in [(112, 105), (144, 128)]:
+        spotted_img[((xx - cx) ** 2 + (yy - cy) ** 2) <= 2 ** 2] = [135, 72, 34]
+
+    res_s = run_full_diagnosis_pipeline(file_source=spotted_img, run_benchmark_comparison=False)
+    assert res_s["postprocess_result"]["num_lesions"] >= 2, (
+        f"Lá 256x256 phải giữ được ít nhất 2 đốm bệnh nhỏ, thực tế: {res_s['postprocess_result']['num_lesions']}"
     )

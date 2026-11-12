@@ -520,6 +520,7 @@ st.markdown(
 # SESSION STATE & GIÁ TRỊ MẶC ĐỊNH
 # =============================================================================
 _DEFAULT_PARAMS: Dict[str, Any] = {
+    "auto_scale_params": True,
     "blur_ksize": 5,
     "blur_sigma": 1.0,
     "k_clusters": 4,
@@ -548,6 +549,24 @@ def create_sample_leaf_image(preset: str = "halo") -> np.ndarray:
     H, W = 320, 320
     img = np.zeros((H, W, 3), dtype=np.uint8)
     yy, xx = np.ogrid[:H, :W]
+
+    if preset == "bleached":
+        # Mô phỏng Ảnh 3: Phông nền vàng-nâu chạm cả 4 cạnh, lá mép răng cưa, ổ bệnh tâm trắng/bạc màu
+        img[:] = [212, 185, 58]  # Nền vàng-nâu chạm 4 cạnh ảnh
+        img[(xx + yy) < 220] = [175, 132, 72]
+
+        angle = np.arctan2(yy - 160.0, xx - 160.0)
+        r_serrated = 1.0 + 0.06 * np.sin(24.0 * angle)
+        leaf_mask = (((xx - 160.0) / (92.0 * r_serrated)) ** 2 + ((yy - 160.0) / (118.0 * r_serrated)) ** 2) <= 1.0
+        img[leaf_mask] = [38, 138, 65]
+
+        # 2 ổ bệnh có viền nâu mỏng và tâm khô trắng/bạc màu (Bleached Center)
+        for cx, cy, r_out, r_in in [(135, 130, 18, 12), (185, 185, 15, 10)]:
+            ring = (((xx - cx) ** 2 + (yy - cy) ** 2) <= r_out ** 2) & leaf_mask
+            core = (((xx - cx) ** 2 + (yy - cy) ** 2) <= r_in ** 2) & leaf_mask
+            img[ring] = [125, 68, 28]
+            img[core] = [232, 224, 210]
+        return img
 
     if preset == "field":
         img[:] = [230, 232, 228]
@@ -609,7 +628,7 @@ def render_annotated_overlay(
     overlay[mask_bool] = 0.62 * overlay[mask_bool] + 0.38 * tint
     blended = np.clip(np.round(overlay), 0, 255).astype(np.uint8)
     return draw_lesion_bboxes_scratch(
-        blended, bboxes, box_color=(220, 38, 38), thickness=2, draw_labels=True
+        blended, bboxes, box_color=(220, 38, 38), thickness=None, draw_labels=True
     )
 
 
@@ -797,9 +816,15 @@ with st.sidebar:
             [
                 "Mẫu 1: Đốm tâm nâu & quầng vàng lớn",
                 "Mẫu 2: Lá bóng nắng, đốm nhỏ (<3%) & nền đất nâu",
+                "Mẫu 3: Lá răng cưa, tâm bệnh bạc màu & nền vàng/nâu",
             ],
         )
-        preset_key = "halo" if sample_preset.startswith("Mẫu 1") else "field"
+        if sample_preset.startswith("Mẫu 1"):
+            preset_key = "halo"
+        elif sample_preset.startswith("Mẫu 2"):
+            preset_key = "field"
+        else:
+            preset_key = "bleached"
         raw_input_source = create_sample_leaf_image(preset=preset_key)
         source_name = f"sample_{preset_key}.png"
 
@@ -818,7 +843,16 @@ with st.sidebar:
     # Khu vực 3 — Tham số thuật toán (Gom gọn vào Expander)
     st.markdown('<div class="sb-label">3. Cấu hình thuật toán</div>', unsafe_allow_html=True)
     with st.expander("⚙️ Tinh chỉnh tham số thuật toán", expanded=False):
-        blur_ksize = st.select_slider("Kích thước lọc Gaussian:", options=[3, 5, 7, 9, 11], key="blur_ksize")
+        auto_scale = st.checkbox(
+            "Tự động tối ưu theo kích thước ảnh (256px / 512px)",
+            key="auto_scale_params",
+        )
+        blur_ksize = st.select_slider(
+            "Kích thước lọc Gaussian:",
+            options=[3, 5, 7, 9, 11],
+            key="blur_ksize",
+            disabled=auto_scale,
+        )
         blur_sigma = st.slider("Gaussian Sigma:", min_value=0.5, max_value=3.0, step=0.1, key="blur_sigma")
         k_clusters = st.slider("Số cụm K-means (K):", min_value=2, max_value=6, step=1, key="k_clusters")
         halo_sensitivity = st.slider(
@@ -828,8 +862,20 @@ with st.sidebar:
             step=0.05,
             key="halo_sensitivity",
         )
-        morph_ksize = st.select_slider("Kernel Hình thái học (Closing):", options=[3, 5, 7, 9], key="morph_ksize")
-        min_area = st.slider("Diện tích ổ bệnh tối thiểu (px):", min_value=5, max_value=200, step=5, key="min_area")
+        morph_ksize = st.select_slider(
+            "Kernel Hình thái học (Closing):",
+            options=[3, 5, 7, 9],
+            key="morph_ksize",
+            disabled=auto_scale,
+        )
+        min_area = st.slider(
+            "Diện tích ổ bệnh tối thiểu (px):",
+            min_value=5,
+            max_value=200,
+            step=5,
+            key="min_area",
+            disabled=auto_scale,
+        )
         st.button("↺ Khôi phục mặc định", on_click=_reset_default_params, **_STRETCH_KW)
 
     status_placeholder = st.empty()
@@ -852,10 +898,10 @@ t_pipe_start = time.perf_counter()
 result = run_full_diagnosis_pipeline(
     file_source=raw_input_source,
     k_clusters=k_clusters,
-    blur_kernel=blur_ksize,
+    blur_kernel=None if auto_scale else blur_ksize,
     blur_sigma=blur_sigma,
-    min_lesion_area=min_area,
-    morph_kernel=morph_ksize,
+    min_lesion_area=None if auto_scale else min_area,
+    morph_kernel=None if auto_scale else morph_ksize,
     yellow_halo_sensitivity=halo_sensitivity,
     run_benchmark_comparison=True,
 )
@@ -1108,7 +1154,12 @@ if analysis_mode == "Chẩn đoán Đa tầng (Full Pipeline)":
 # =============================================================================
 elif analysis_mode == "Chuyên sâu Otsu (Scratch vs OpenCV)":
     fb_local: List[str] = []
-    prep = call_preprocess(result["original_rgb"], blur_kernel=blur_ksize, blur_sigma=blur_sigma, fallback_tracker=fb_local)
+    _m2_blur = (
+        (3 if max(result["original_rgb"].shape[:2]) <= 320 else 5) if auto_scale else blur_ksize
+    )
+    prep = call_preprocess(
+        result["original_rgb"], blur_kernel=_m2_blur, blur_sigma=blur_sigma, fallback_tracker=fb_local
+    )
 
     with st.container(border=True, key="card_m2_opts"):
         otsu_ch = st.radio(

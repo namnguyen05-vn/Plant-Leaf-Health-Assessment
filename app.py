@@ -520,6 +520,7 @@ st.markdown(
 # SESSION STATE & GIÁ TRỊ MẶC ĐỊNH
 # =============================================================================
 _DEFAULT_PARAMS: Dict[str, Any] = {
+    "auto_scale_params": True,
     "blur_ksize": 5,
     "blur_sigma": 1.0,
     "k_clusters": 4,
@@ -842,7 +843,16 @@ with st.sidebar:
     # Khu vực 3 — Tham số thuật toán (Gom gọn vào Expander)
     st.markdown('<div class="sb-label">3. Cấu hình thuật toán</div>', unsafe_allow_html=True)
     with st.expander("⚙️ Tinh chỉnh tham số thuật toán", expanded=False):
-        blur_ksize = st.select_slider("Kích thước lọc Gaussian:", options=[3, 5, 7, 9, 11], key="blur_ksize")
+        auto_scale = st.checkbox(
+            "Tự động tối ưu theo kích thước ảnh (256px / 512px)",
+            key="auto_scale_params",
+        )
+        blur_ksize = st.select_slider(
+            "Kích thước lọc Gaussian:",
+            options=[3, 5, 7, 9, 11],
+            key="blur_ksize",
+            disabled=auto_scale,
+        )
         blur_sigma = st.slider("Gaussian Sigma:", min_value=0.5, max_value=3.0, step=0.1, key="blur_sigma")
         k_clusters = st.slider("Số cụm K-means (K):", min_value=2, max_value=6, step=1, key="k_clusters")
         halo_sensitivity = st.slider(
@@ -852,8 +862,20 @@ with st.sidebar:
             step=0.05,
             key="halo_sensitivity",
         )
-        morph_ksize = st.select_slider("Kernel Hình thái học (Closing):", options=[3, 5, 7, 9], key="morph_ksize")
-        min_area = st.slider("Diện tích ổ bệnh tối thiểu (px):", min_value=5, max_value=200, step=5, key="min_area")
+        morph_ksize = st.select_slider(
+            "Kernel Hình thái học (Closing):",
+            options=[3, 5, 7, 9],
+            key="morph_ksize",
+            disabled=auto_scale,
+        )
+        min_area = st.slider(
+            "Diện tích ổ bệnh tối thiểu (px):",
+            min_value=5,
+            max_value=200,
+            step=5,
+            key="min_area",
+            disabled=auto_scale,
+        )
         st.button("↺ Khôi phục mặc định", on_click=_reset_default_params, **_STRETCH_KW)
 
     status_placeholder = st.empty()
@@ -876,10 +898,10 @@ t_pipe_start = time.perf_counter()
 result = run_full_diagnosis_pipeline(
     file_source=raw_input_source,
     k_clusters=k_clusters,
-    blur_kernel=blur_ksize,
+    blur_kernel=None if auto_scale else blur_ksize,
     blur_sigma=blur_sigma,
-    min_lesion_area=min_area,
-    morph_kernel=morph_ksize,
+    min_lesion_area=None if auto_scale else min_area,
+    morph_kernel=None if auto_scale else morph_ksize,
     yellow_halo_sensitivity=halo_sensitivity,
     run_benchmark_comparison=True,
 )
@@ -1132,7 +1154,12 @@ if analysis_mode == "Chẩn đoán Đa tầng (Full Pipeline)":
 # =============================================================================
 elif analysis_mode == "Chuyên sâu Otsu (Scratch vs OpenCV)":
     fb_local: List[str] = []
-    prep = call_preprocess(result["original_rgb"], blur_kernel=blur_ksize, blur_sigma=blur_sigma, fallback_tracker=fb_local)
+    _m2_blur = (
+        (3 if max(result["original_rgb"].shape[:2]) <= 320 else 5) if auto_scale else blur_ksize
+    )
+    prep = call_preprocess(
+        result["original_rgb"], blur_kernel=_m2_blur, blur_sigma=blur_sigma, fallback_tracker=fb_local
+    )
 
     with st.container(border=True, key="card_m2_opts"):
         otsu_ch = st.radio(

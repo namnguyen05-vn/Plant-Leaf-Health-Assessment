@@ -310,6 +310,101 @@ def fill_holes_bfs_scratch(mask: np.ndarray) -> np.ndarray:
     return np.where(~bg_arr, 255, 0).astype(np.uint8)
 
 
+def fill_small_holes_bfs_scratch(
+    mask: np.ndarray,
+    max_hole_area: int = 500,
+) -> np.ndarray:
+    """Chỉ lấp đầy các lỗ thủng CỤC BỘ có diện tích nhỏ (`<= max_hole_area`) bằng BFS.
+
+    Khác với `fill_holes_bfs_scratch`, hàm này đo diện tích từng lỗ thủng khép kín và
+    CHỈ lấp các lỗ nhỏ nằm gọn trong từng đốm bệnh (ví dụ tâm bạc màu), tuyệt đối không
+    lấp vùng lá khỏe khổng lồ nếu chẳng may có một viền nhiễu mảnh bao quanh chu vi lá.
+
+    Args:
+        mask: Mặt nạ nhị phân `(H, W)`, kiểu `np.uint8` `{0, 255}`.
+        max_hole_area: Ngưỡng diện tích tối đa của một lỗ được phép lấp (pixel).
+
+    Returns:
+        np.ndarray: Mặt nạ đã lấp lỗ cục bộ `(H, W)`, kiểu `np.uint8` `{0, 255}`.
+    """
+    if not isinstance(mask, np.ndarray) or mask.ndim != 2:
+        raise ValueError(
+            f"Mặt nạ đầu vào phải là mảng NumPy 2 chiều (H, W), nhận được: {getattr(mask, 'shape', type(mask))}."
+        )
+    H, W = mask.shape
+    if H == 0 or W == 0 or max_hole_area <= 0:
+        return np.where(mask > 0, 255, 0).astype(np.uint8)
+
+    fg = (mask > 0).tolist()
+    visited_bg = [[False] * W for _ in range(H)]
+    queue: deque = deque()
+
+    # Bước 1: Đánh dấu toàn bộ nền thông ra 4 cạnh viền ảnh
+    for c in range(W):
+        if not fg[0][c] and not visited_bg[0][c]:
+            visited_bg[0][c] = True
+            queue.append((0, c))
+        if not fg[H - 1][c] and not visited_bg[H - 1][c]:
+            visited_bg[H - 1][c] = True
+            queue.append((H - 1, c))
+    for r in range(1, H - 1):
+        if not fg[r][0] and not visited_bg[r][0]:
+            visited_bg[r][0] = True
+            queue.append((r, 0))
+        if not fg[r][W - 1] and not visited_bg[r][W - 1]:
+            visited_bg[r][W - 1] = True
+            queue.append((r, W - 1))
+
+    while queue:
+        r, c = queue.popleft()
+        if r > 0 and not fg[r - 1][c] and not visited_bg[r - 1][c]:
+            visited_bg[r - 1][c] = True
+            queue.append((r - 1, c))
+        if r + 1 < H and not fg[r + 1][c] and not visited_bg[r + 1][c]:
+            visited_bg[r + 1][c] = True
+            queue.append((r + 1, c))
+        if c > 0 and not fg[r][c - 1] and not visited_bg[r][c - 1]:
+            visited_bg[r][c - 1] = True
+            queue.append((r, c - 1))
+        if c + 1 < W and not fg[r][c + 1] and not visited_bg[r][c + 1]:
+            visited_bg[r][c + 1] = True
+            queue.append((r, c + 1))
+
+    # Bước 2: Gom từng lỗ thủng khép kín và chỉ lấp nếu diện tích <= max_hole_area
+    out = np.where(mask > 0, 255, 0).astype(np.uint8)
+    hole_rows_idx, hole_cols_idx = np.where((~np.asarray(fg, dtype=bool)) & (~np.asarray(visited_bg, dtype=bool)))
+
+    for sr, sc in zip(hole_rows_idx.tolist(), hole_cols_idx.tolist()):
+        if visited_bg[sr][sc]:
+            continue
+        visited_bg[sr][sc] = True
+        h_queue = deque([(sr, sc)])
+        comp_r: List[int] = []
+        comp_c: List[int] = []
+
+        while h_queue:
+            r, c = h_queue.popleft()
+            comp_r.append(r)
+            comp_c.append(c)
+            if r > 0 and not fg[r - 1][c] and not visited_bg[r - 1][c]:
+                visited_bg[r - 1][c] = True
+                h_queue.append((r - 1, c))
+            if r + 1 < H and not fg[r + 1][c] and not visited_bg[r + 1][c]:
+                visited_bg[r + 1][c] = True
+                h_queue.append((r + 1, c))
+            if c > 0 and not fg[r][c - 1] and not visited_bg[r][c - 1]:
+                visited_bg[r][c - 1] = True
+                h_queue.append((r, c - 1))
+            if c + 1 < W and not fg[r][c + 1] and not visited_bg[r][c + 1]:
+                visited_bg[r][c + 1] = True
+                h_queue.append((r, c + 1))
+
+        if len(comp_r) <= max_hole_area:
+            out[comp_r, comp_c] = 255
+
+    return out
+
+
 def keep_largest_connected_component_scratch(
     mask: np.ndarray,
     prefer_central: bool = True,

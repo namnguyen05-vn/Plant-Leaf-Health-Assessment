@@ -549,6 +549,24 @@ def create_sample_leaf_image(preset: str = "halo") -> np.ndarray:
     img = np.zeros((H, W, 3), dtype=np.uint8)
     yy, xx = np.ogrid[:H, :W]
 
+    if preset == "bleached":
+        # Mô phỏng Ảnh 3: Phông nền vàng-nâu chạm cả 4 cạnh, lá mép răng cưa, ổ bệnh tâm trắng/bạc màu
+        img[:] = [212, 185, 58]  # Nền vàng-nâu chạm 4 cạnh ảnh
+        img[(xx + yy) < 220] = [175, 132, 72]
+
+        angle = np.arctan2(yy - 160.0, xx - 160.0)
+        r_serrated = 1.0 + 0.06 * np.sin(24.0 * angle)
+        leaf_mask = (((xx - 160.0) / (92.0 * r_serrated)) ** 2 + ((yy - 160.0) / (118.0 * r_serrated)) ** 2) <= 1.0
+        img[leaf_mask] = [38, 138, 65]
+
+        # 2 ổ bệnh có viền nâu mỏng và tâm khô trắng/bạc màu (Bleached Center)
+        for cx, cy, r_out, r_in in [(135, 130, 18, 12), (185, 185, 15, 10)]:
+            ring = (((xx - cx) ** 2 + (yy - cy) ** 2) <= r_out ** 2) & leaf_mask
+            core = (((xx - cx) ** 2 + (yy - cy) ** 2) <= r_in ** 2) & leaf_mask
+            img[ring] = [125, 68, 28]
+            img[core] = [232, 224, 210]
+        return img
+
     if preset == "field":
         img[:] = [230, 232, 228]
         img[(xx + 0.75 * yy) < 135] = [142, 102, 65]
@@ -609,7 +627,7 @@ def render_annotated_overlay(
     overlay[mask_bool] = 0.62 * overlay[mask_bool] + 0.38 * tint
     blended = np.clip(np.round(overlay), 0, 255).astype(np.uint8)
     return draw_lesion_bboxes_scratch(
-        blended, bboxes, box_color=(220, 38, 38), thickness=2, draw_labels=True
+        blended, bboxes, box_color=(220, 38, 38), thickness=None, draw_labels=True
     )
 
 
@@ -797,9 +815,15 @@ with st.sidebar:
             [
                 "Mẫu 1: Đốm tâm nâu & quầng vàng lớn",
                 "Mẫu 2: Lá bóng nắng, đốm nhỏ (<3%) & nền đất nâu",
+                "Mẫu 3: Lá răng cưa, tâm bệnh bạc màu & nền vàng/nâu",
             ],
         )
-        preset_key = "halo" if sample_preset.startswith("Mẫu 1") else "field"
+        if sample_preset.startswith("Mẫu 1"):
+            preset_key = "halo"
+        elif sample_preset.startswith("Mẫu 2"):
+            preset_key = "field"
+        else:
+            preset_key = "bleached"
         raw_input_source = create_sample_leaf_image(preset=preset_key)
         source_name = f"sample_{preset_key}.png"
 

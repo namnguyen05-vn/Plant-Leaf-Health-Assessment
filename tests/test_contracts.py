@@ -38,6 +38,7 @@ from src.postprocess import (
     draw_lesion_bboxes_scratch,
     erode_scratch,
     fill_holes_bfs_scratch,
+    filter_margin_noise_components_scratch,
     keep_largest_connected_component_scratch,
     opening_scratch,
 )
@@ -618,3 +619,76 @@ def test_pipeline_brown_soil_and_small_spots_scenario():
     assert res["postprocess_result"]["num_lesions"] == 6, (
         f"Kỳ vọng phát hiện 6 ổ bệnh nhỏ trên mặt lá bóng nắng, thực tế: {res['postprocess_result']['num_lesions']}."
     )
+
+
+def test_postprocess_margin_filter_contract():
+    """Kiểm tra lọc nhiễu viền mép bằng filter_margin_noise_components_scratch."""
+    inner_mask = np.zeros((100, 100), dtype=np.uint8)
+    inner_mask[20:80, 20:80] = 255
+
+    lesion_mask = np.zeros((100, 100), dtype=np.uint8)
+    # Ổ bệnh thật nằm sâu trong lá (diện tích 100 px)
+    lesion_mask[40:50, 40:50] = 255
+    # Dải nhiễu dài bám ngoài rìa mép (diện tích 40 px >= min_area=20, nhưng ngoài inner_mask)
+    lesion_mask[15:17, 30:50] = 255
+
+    res = filter_margin_noise_components_scratch(lesion_mask, inner_mask, min_area=20, min_inner_ratio=0.40)
+    assert res["num_lesions"] == 1, f"Nhiễu bám rìa ngoài mép phải bị loại sạch, thực tế: {res['num_lesions']}."
+    assert res["cleaned_mask"][15, 35] == 0
+    assert res["cleaned_mask"][45, 45] == 255
+
+
+def test_pipeline_yellow_brown_border_and_bleached_serrated_scenario():
+    """Kiểm thử Ảnh 3: Phông nền vàng-nâu chạm 4 cạnh, lá răng cưa nhiễu mép, và ổ bệnh tâm bạc màu."""
+    H, W = 280, 280
+    # Phông nền vàng rực + góc nâu chạm cả 4 cạnh khung hình
+    img = np.full((H, W, 3), [215, 192, 48], dtype=np.uint8)
+    yy, xx = np.ogrid[:H, :W]
+    img[(xx + yy) < 200] = [165, 118, 65]
+
+    # Lá cây có mép răng cưa ở trung tâm
+    angle = np.arctan2(yy - 140.0, xx - 140.0)
+    r_serr = 1.0 + 0.06 * np.sin(24.0 * angle)
+    leaf = (((xx - 140.0) / (82.0 * r_serr)) ** 2 + ((yy - 140.0) / (100.0 * r_serr)) ** 2) <= 1.0
+    img[leaf] = [38, 138, 65]
+
+    # Giả lập dải nhiễu pha trộn màu ở mép lá (vùng răng cưa sát viền)
+    edge_band = leaf & (
+        (((xx - 140.0) / (78.0 * r_serr)) ** 2 + ((yy - 140.0) / (96.0 * r_serr)) ** 2) > 1.0
+    )
+    img[edge_band] = [125, 118, 68]
+
+    # 2 ổ bệnh có viền nâu mỏng và tâm khô trắng/bạc màu (như ổ bệnh #29, #24)
+    for cx, cy, r_out, r_in in [(120, 115, 16, 10), (165, 168, 14, 9)]:
+        ring = (((xx - cx) ** 2 + (yy - cy) ** 2) <= r_out ** 2) & leaf
+        core = (((xx - cx) ** 2 + (yy - cy) ** 2) <= r_in ** 2) & leaf
+        img[ring] = [122, 65, 28]
+        img[core] = [235, 228, 215]
+
+    res = run_full_diagnosis_pipeline(
+        file_source=img,
+        k_clusters=4,
+        blur_kernel=3,
+        min_lesion_area=20,
+        morph_kernel=5,
+        yellow_halo_sensitivity=0.65,
+        run_benchmark_comparison=False,
+    )
+
+    # 1. Phông nền vàng/nâu chạm 4 viền KHÔNG được tràn vào leaf_mask
+    assert np.all(res["leaf_mask"][0, :] == 0) and np.all(res["leaf_mask"][-1, :] == 0), (
+        "leaf_mask không được tràn ra viền trên/dưới phông nền vàng-nâu."
+    )
+    assert np.all(res["leaf_mask"][:, 0] == 0) and np.all(res["leaf_mask"][:, -1] == 0), (
+        "leaf_mask không được tràn ra viền trái/phải phông nền vàng-nâu."
+    )
+
+    # 2. Phải phát hiện đúng 2 ổ bệnh thật (không bị hàng chục BBox nhiễu dọc mép răng cưa)
+    assert res["postprocess_result"]["num_lesions"] == 2, (
+        f"Kỳ vọng đúng 2 ổ bệnh tâm bạc màu (loại sạch nhiễu mép), thực tế: {res['postprocess_result']['num_lesions']}."
+    )
+
+    # 3. Tâm bạc màu bên trong cả 2 ổ bệnh phải được lấp đầy hoàn toàn
+    cleaned = res["postprocess_result"]["cleaned_mask"]
+    assert cleaned[115, 120] == 255, "Tâm bạc màu của ổ bệnh 1 phải được bắt trọn / lấp đầy."
+    assert cleaned[168, 165] == 255, "Tâm bạc màu của ổ bệnh 2 phải được bắt trọn / lấp đầy."

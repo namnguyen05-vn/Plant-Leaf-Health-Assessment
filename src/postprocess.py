@@ -17,23 +17,24 @@ QUY TẮC BẮT BUỘC (CODE FROM SCRATCH):
 """
 
 from collections import deque
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+import math
 import numpy as np
 
 
-# Bảng phông chữ bitmap 5x7 tối giản (chỉ bằng NumPy) để vẽ chỉ số ổ bệnh #1, #2...
-_DIGIT_FONT_5X7: Dict[str, Tuple[str, ...]] = {
-    "0": ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
-    "1": ("00100", "01100", "00100", "00100", "00100", "00100", "01110"),
-    "2": ("01110", "10001", "00001", "00110", "01000", "10000", "11111"),
-    "3": ("11110", "00001", "00001", "01110", "00001", "00001", "11110"),
-    "4": ("00010", "00110", "01010", "10010", "11111", "00010", "00010"),
-    "5": ("11111", "10000", "11110", "00001", "00001", "10001", "01110"),
-    "6": ("00110", "01000", "10000", "11110", "10001", "10001", "01110"),
-    "7": ("11111", "00001", "00010", "00100", "01000", "01000", "01000"),
-    "8": ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
-    "9": ("01110", "10001", "10001", "01111", "00001", "00010", "01100"),
-    "#": ("01010", "01010", "11111", "01010", "11111", "01010", "01010"),
+# Bảng phông chữ bitmap siêu gọn 3x5 (100% NumPy) để vẽ nhãn #1, #2... sắc nét không che vết bệnh
+_MICRO_FONT_3X5: Dict[str, Tuple[str, ...]] = {
+    "0": ("111", "101", "101", "101", "111"),
+    "1": ("010", "110", "010", "010", "111"),
+    "2": ("111", "001", "111", "100", "111"),
+    "3": ("111", "001", "111", "001", "111"),
+    "4": ("101", "101", "111", "001", "001"),
+    "5": ("111", "100", "111", "001", "111"),
+    "6": ("111", "100", "111", "101", "111"),
+    "7": ("111", "001", "001", "001", "001"),
+    "8": ("111", "101", "111", "101", "111"),
+    "9": ("111", "101", "111", "001", "111"),
+    "#": ("101", "111", "101", "111", "101"),
 }
 
 
@@ -309,16 +310,21 @@ def fill_holes_bfs_scratch(mask: np.ndarray) -> np.ndarray:
     return np.where(~bg_arr, 255, 0).astype(np.uint8)
 
 
-def keep_largest_connected_component_scratch(mask: np.ndarray) -> np.ndarray:
-    """Giữ lại duy nhất thành phần liên thông 8-hướng có diện tích lớn nhất (chiếc lá chính).
+def keep_largest_connected_component_scratch(
+    mask: np.ndarray,
+    prefer_central: bool = True,
+) -> np.ndarray:
+    """Giữ lại thành phần liên thông 8-hướng chính của chiếc lá (ưu tiên thành phần lớn nằm gần tâm ảnh).
 
-    Loại bỏ hoàn toàn các đốm cỏ dại, nhiễu nền đất/gỗ rời rạc nằm xung quanh rìa ảnh.
+    Loại bỏ hoàn toàn các đốm cỏ dại, nhiễu nền hoặc vùng viền phông nền bám ở 4 góc ảnh.
 
     Args:
         mask: Mặt nạ nhị phân 2 chiều kích thước `(H, W)`, kiểu `np.uint8`, giá trị `{0, 255}`.
+        prefer_central: Nếu True, ưu tiên trọng số theo khoảng cách tới tâm ảnh để tránh chọn
+            nhầm mảng nền rìa ảnh. Mặc định là True.
 
     Returns:
-        np.ndarray: Mặt nạ chỉ chứa thành phần liên thông lớn nhất, kích thước `(H, W)`, kiểu `np.uint8`.
+        np.ndarray: Mặt nạ chỉ chứa thành phần liên thông chính, kích thước `(H, W)`, kiểu `np.uint8`.
 
     Raises:
         ValueError: Nếu `mask` không phải mảng 2 chiều.
@@ -341,6 +347,9 @@ def keep_largest_connected_component_scratch(mask: np.ndarray) -> np.ndarray:
         (1, -1),  (1, 0),  (1, 1),
     ]
 
+    half_h = max(H / 2.0, 1.0)
+    half_w = max(W / 2.0, 1.0)
+    best_score = -1.0
     best_rows: List[int] = []
     best_cols: List[int] = []
 
@@ -351,11 +360,21 @@ def keep_largest_connected_component_scratch(mask: np.ndarray) -> np.ndarray:
         queue = deque([(start_r, start_c)])
         comp_rows: List[int] = []
         comp_cols: List[int] = []
+        touches_top = touches_bot = touches_left = touches_right = False
 
         while queue:
             r, c = queue.popleft()
             comp_rows.append(r)
             comp_cols.append(c)
+            if r == 0:
+                touches_top = True
+            if r == H - 1:
+                touches_bot = True
+            if c == 0:
+                touches_left = True
+            if c == W - 1:
+                touches_right = True
+
             for dr, dc in directions:
                 nr = r + dr
                 nc = c + dc
@@ -363,7 +382,19 @@ def keep_largest_connected_component_scratch(mask: np.ndarray) -> np.ndarray:
                     visited[nr][nc] = True
                     queue.append((nr, nc))
 
-        if len(comp_rows) > len(best_rows):
+        area = len(comp_rows)
+        if prefer_central:
+            cy = sum(comp_rows) / float(area)
+            cx = sum(comp_cols) / float(area)
+            dist_norm_sq = ((cy - half_h) / half_h) ** 2 + ((cx - half_w) / half_w) ** 2
+            border_count = int(touches_top) + int(touches_bot) + int(touches_left) + int(touches_right)
+            border_penalty = 0.30 if border_count >= 3 else 1.0
+            score = float(area) * math.exp(-0.55 * dist_norm_sq) * border_penalty
+        else:
+            score = float(area)
+
+        if score > best_score:
+            best_score = score
             best_rows = comp_rows
             best_cols = comp_cols
 
@@ -371,6 +402,114 @@ def keep_largest_connected_component_scratch(mask: np.ndarray) -> np.ndarray:
     if best_rows:
         out[best_rows, best_cols] = 255
     return out
+
+
+def filter_margin_noise_components_scratch(
+    mask: np.ndarray,
+    inner_mask: np.ndarray,
+    min_area: int = 20,
+    min_inner_ratio: float = 0.40,
+) -> Dict[str, Any]:
+    """Lọc thành phần liên thông BFS 8-hướng và xóa sạch nhiễu viền mép răng cưa.
+
+    Chỉ giữ lại các ổ bệnh có diện tích `>= min_area` VÀ thỏa mãn điều kiện nằm bên trong lá:
+    tâm hình học `(cy, cx)` nằm trong `inner_mask` HOẶC có ít nhất `min_inner_ratio` (mặc định 40%)
+    diện tích nằm bên trong `inner_mask`.
+
+    Args:
+        mask: Mặt nạ vùng bệnh nhị phân `(H, W)`, kiểu `np.uint8` `{0, 255}`.
+        inner_mask: Mặt nạ nội vùng lá đã co mép `(H, W)`, kiểu `np.uint8` `{0, 255}`.
+        min_area: Diện tích điểm ảnh tối thiểu (mặc định 20).
+        min_inner_ratio: Tỷ lệ diện tích tối thiểu nằm bên trong `inner_mask` (mặc định 0.40).
+
+    Returns:
+        Dict[str, Any]: Dictionary chuẩn `"cleaned_mask"`, `"num_lesions"`, `"bboxes"`.
+    """
+    if not isinstance(mask, np.ndarray) or mask.ndim != 2:
+        raise ValueError(
+            f"Mặt nạ đầu vào phải là mảng 2 chiều (H, W), nhận được: {getattr(mask, 'shape', type(mask))}."
+        )
+    if inner_mask.shape != mask.shape:
+        raise ValueError(f"inner_mask {inner_mask.shape} không khớp kích thước mask {mask.shape}.")
+    if min_area < 1:
+        raise ValueError(f"min_area phải >= 1, nhận được: {min_area}.")
+
+    if int(np.sum(inner_mask > 0)) == 0:
+        return connected_components_bfs_scratch(mask, min_area=min_area)
+
+    H, W = mask.shape
+    binary = mask > 0
+    fg_rows, fg_cols = np.where(binary)
+    cleaned_mask = np.zeros((H, W), dtype=np.uint8)
+    bboxes: List[Tuple[int, int, int, int, int]] = []
+
+    if fg_rows.size == 0:
+        return {"cleaned_mask": cleaned_mask, "num_lesions": 0, "bboxes": bboxes}
+
+    grid = binary.tolist()
+    inner_grid = (inner_mask > 0).tolist()
+    visited = [[False] * W for _ in range(H)]
+    directions = [
+        (-1, -1), (-1, 0), (-1, 1),
+        (0, -1),           (0, 1),
+        (1, -1),  (1, 0),  (1, 1),
+    ]
+
+    for start_r, start_c in zip(fg_rows.tolist(), fg_cols.tolist()):
+        if visited[start_r][start_c]:
+            continue
+        visited[start_r][start_c] = True
+        queue = deque([(start_r, start_c)])
+        comp_rows: List[int] = []
+        comp_cols: List[int] = []
+        min_r = max_r = start_r
+        min_c = max_c = start_c
+        inside_count = 0
+
+        while queue:
+            r, c = queue.popleft()
+            comp_rows.append(r)
+            comp_cols.append(c)
+            if inner_grid[r][c]:
+                inside_count += 1
+            if r < min_r:
+                min_r = r
+            elif r > max_r:
+                max_r = r
+            if c < min_c:
+                min_c = c
+            elif c > max_c:
+                max_c = c
+
+            for dr, dc in directions:
+                nr = r + dr
+                nc = c + dc
+                if 0 <= nr < H and 0 <= nc < W and grid[nr][nc] and not visited[nr][nc]:
+                    visited[nr][nc] = True
+                    queue.append((nr, nc))
+
+        area = len(comp_rows)
+        if area < min_area:
+            continue
+
+        cy = min(H - 1, max(0, int(round(sum(comp_rows) / float(area)))))
+        cx = min(W - 1, max(0, int(round(sum(comp_cols) / float(area)))))
+        inside_ratio = inside_count / float(area)
+
+        if inner_grid[cy][cx] or inside_ratio >= min_inner_ratio:
+            cleaned_mask[comp_rows, comp_cols] = 255
+            x = int(min_c)
+            y = int(min_r)
+            w = int(max_c - min_c + 1)
+            h = int(max_r - min_r + 1)
+            bboxes.append((x, y, w, h, int(area)))
+
+    bboxes.sort(key=lambda item: item[4], reverse=True)
+    return {
+        "cleaned_mask": cleaned_mask,
+        "num_lesions": int(len(bboxes)),
+        "bboxes": bboxes,
+    }
 
 
 def _draw_text_numpy(
@@ -382,29 +521,32 @@ def _draw_text_numpy(
     bg_color: Tuple[int, int, int] = (220, 38, 38),
     scale: int = 1,
 ) -> None:
-    """Vẽ chuỗi ký tự số đơn giản (#1, #2, ...) trực tiếp bằng mảng NumPy (không dùng OpenCV)."""
+    """Vẽ chuỗi ký tự siêu gọn (#1, #2, ...) bằng font bitmap 3x5 hoàn toàn bằng NumPy."""
     H, W = canvas.shape[:2]
-    char_w = 5 * scale
-    char_h = 7 * scale
-    pad = 2 * scale
-    total_w = len(text) * (char_w + scale) - scale + 2 * pad
+    char_w = 3 * scale
+    char_h = 5 * scale
+    gap = scale
+    pad = max(1, scale)
+    total_w = len(text) * (char_w + gap) - gap + 2 * pad
     total_h = char_h + 2 * pad
 
-    y0 = max(0, top_y)
-    x0 = max(0, left_x)
-    y1 = min(H, y0 + total_h)
+    x0 = max(0, min(W - total_w, left_x))
+    y0 = max(0, min(H - total_h, top_y))
     x1 = min(W, x0 + total_w)
+    y1 = min(H, y0 + total_h)
 
     if y1 <= y0 or x1 <= x0:
         return
 
-    # Vẽ nền nhãn nhỏ gọn
-    canvas[y0:y1, x0:x1] = bg_color
+    # Pha trộn nền nhãn bán trong suốt (alpha 0.85) để không che lấp chi tiết bên dưới
+    bg_arr = np.array(bg_color, dtype=np.float32)
+    roi = canvas[y0:y1, x0:x1].astype(np.float32)
+    canvas[y0:y1, x0:x1] = np.clip(np.round(0.85 * bg_arr + 0.15 * roi), 0, 255).astype(np.uint8)
 
     cursor_x = x0 + pad
     cursor_y = y0 + pad
     for ch in text:
-        glyph = _DIGIT_FONT_5X7.get(ch)
+        glyph = _MICRO_FONT_3X5.get(ch)
         if glyph is not None:
             for gy, row_bits in enumerate(glyph):
                 for gx, bit in enumerate(row_bits):
@@ -415,23 +557,26 @@ def _draw_text_numpy(
                         px1 = min(W, px0 + scale)
                         if py0 < H and px0 < W and py1 > py0 and px1 > px0:
                             canvas[py0:py1, px0:px1] = fg_color
-        cursor_x += char_w + scale
+        cursor_x += char_w + gap
 
 
 def draw_lesion_bboxes_scratch(
     rgb_img: np.ndarray,
     bboxes: List[Tuple[int, int, int, int, int]],
     box_color: Tuple[int, int, int] = (239, 68, 68),
-    thickness: int = 2,
+    thickness: Optional[int] = None,
     draw_labels: bool = True,
 ) -> np.ndarray:
     """Vẽ hộp bao Bounding Box và số thứ tự ổ bệnh trực tiếp lên ảnh RGB bằng mảng NumPy.
+
+    Độ dày nét vẽ và cỡ chữ tự động co giãn tỷ lệ theo kích thước ảnh để nhãn `#1, #2...`
+    nhỏ gọn, sắc nét, đặt ở mép trên khung mà không che khuất vết bệnh bên dưới.
 
     Args:
         rgb_img: Ảnh RGB gốc kích thước `(H, W, 3)` hoặc ảnh xám `(H, W)`, kiểu `np.uint8`.
         bboxes: Danh sách các hộp bao `(x, y, w, h, area)` từ `connected_components_bfs_scratch`.
         box_color: Màu RGB cho đường viền hộp bao. Mặc định là đỏ `(239, 68, 68)`.
-        thickness: Độ dày đường viền (pixel). Mặc định là 2.
+        thickness: Độ dày đường viền (pixel). Nếu None, tự tính `max(1, int(min(H, W) / 250))`.
         draw_labels: Nếu True, vẽ số thứ tự `#1`, `#2`, ... ở góc trên trái mỗi BBox.
 
     Returns:
@@ -443,7 +588,14 @@ def draw_lesion_bboxes_scratch(
         canvas = rgb_img.copy().astype(np.uint8)
 
     H, W = canvas.shape[:2]
-    scale = 1 if max(H, W) < 400 else 2
+    min_dim = min(H, W)
+    line_t = max(1, int(min_dim / 250)) if thickness is None else max(1, int(thickness))
+    font_scale = max(0.35, min_dim / 900.0)
+    int_scale = 1 if font_scale < 0.78 else max(2, int(round(font_scale * 1.4)))
+
+    char_h = 5 * int_scale
+    pad = max(1, int_scale)
+    label_h = char_h + 2 * pad
 
     for idx, bbox in enumerate(bboxes, start=1):
         x, y, w, h = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
@@ -453,14 +605,13 @@ def draw_lesion_bboxes_scratch(
         y2 = max(0, min(H - 1, y + h - 1))
 
         # Vẽ 4 cạnh hộp bao bằng NumPy slicing
-        canvas[y1 : min(H, y1 + thickness), x1 : x2 + 1] = box_color
-        canvas[max(0, y2 - thickness + 1) : y2 + 1, x1 : x2 + 1] = box_color
-        canvas[y1 : y2 + 1, x1 : min(W, x1 + thickness)] = box_color
-        canvas[y1 : y2 + 1, max(0, x2 - thickness + 1) : x2 + 1] = box_color
+        canvas[y1 : min(H, y1 + line_t), x1 : x2 + 1] = box_color
+        canvas[max(0, y2 - line_t + 1) : y2 + 1, x1 : x2 + 1] = box_color
+        canvas[y1 : y2 + 1, x1 : min(W, x1 + line_t)] = box_color
+        canvas[y1 : y2 + 1, max(0, x2 - line_t + 1) : x2 + 1] = box_color
 
         if draw_labels:
             label_text = f"#{idx}"
-            label_h = 7 * scale + 4 * scale
             label_y = y1 - label_h if y1 >= label_h else y1
             _draw_text_numpy(
                 canvas,
@@ -469,7 +620,7 @@ def draw_lesion_bboxes_scratch(
                 left_x=x1,
                 fg_color=(255, 255, 255),
                 bg_color=box_color,
-                scale=scale,
+                scale=int_scale,
             )
 
     return canvas

@@ -17,7 +17,7 @@ tất cả các module thành phần của hệ thống phân tích sức khỏe
 
 from pathlib import Path
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 from PIL import Image

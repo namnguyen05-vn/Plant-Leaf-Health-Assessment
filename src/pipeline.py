@@ -17,7 +17,7 @@ tất cả các module thành phần của hệ thống phân tích sức khỏe
 
 from pathlib import Path
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -34,8 +34,12 @@ from src.color_clustering import extract_disease_and_healthy_masks
 from src.postprocess import (
     closing_scratch,
     connected_components_bfs_scratch,
+    dilate_scratch,
     draw_lesion_bboxes_scratch,
+    erode_scratch,
     fill_holes_bfs_scratch,
+    fill_small_holes_bfs_scratch,
+    filter_margin_noise_components_scratch,
     keep_largest_connected_component_scratch,
     opening_scratch,
 )
@@ -316,6 +320,224 @@ def _fallback_kmeans(
     }
 
 
+def rgb_to_lab_scratch(rgb_img: np.ndarray) -> np.ndarray:
+    """Chuyển đổi ảnh sRGB `(H, W, 3)` sang không gian CIE L*a*b* (D65) thuần NumPy.
+
+    Đầu ra có hình dạng `(H, W, 3)` kiểu `np.float32`:
+        - `L*` thuộc `[0, 100]`
+        - `a*` khoảng `[-86, +98]` (âm = xanh lá, dương = đỏ/tím)
+        - `b*` khoảng `[-108, +95]` (dương = vàng, âm = xanh dương)
+    """
+    rgb_f = np.clip(rgb_img.astype(np.float32) / 255.0, 0.0, 1.0)
+    linear = np.where(
+        rgb_f <= 0.04045,
+        rgb_f / 12.92,
+        np.power(np.clip((rgb_f + 0.055) / 1.055, 0.0, None), 2.4),
+    )
+    r, g, b = linear[:, :, 0], linear[:, :, 1], linear[:, :, 2]
+
+    x = (0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / 0.95047
+    y = 0.2126729 * r + 0.7151522 * g + 0.0721750 * b
+    z = (0.0193339 * r + 0.1191920 * g + 0.9503041 * b) / 1.08883
+
+    eps = 216.0 / 24389.0
+    kappa = 24389.0 / 27.0
+
+    fx = np.where(x > eps, np.cbrt(np.clip(x, 0.0, None)), (kappa * x + 16.0) / 116.0)
+    fy = np.where(y > eps, np.cbrt(np.clip(y, 0.0, None)), (kappa * y + 16.0) / 116.0)
+    fz = np.where(z > eps, np.cbrt(np.clip(z, 0.0, None)), (kappa * z + 16.0) / 116.0)
+
+    L = 116.0 * fy - 16.0
+    a = 500.0 * (fx - fy)
+    b_lab = 200.0 * (fy - fz)
+    return np.stack([L, a, b_lab], axis=-1).astype(np.float32)
+
+
+def _compute_leaf_healthy_baseline(
+    rgb_img: np.ndarray,
+    lab_img: np.ndarray,
+    leaf_mask: Optional[np.ndarray] = None,
+) -> Dict[str, Any]:
+    """Ước lượng phân phối mô khỏe của chính chiếc lá (Median & MAD bền vững theo CIE Lab/ExG)."""
+    H, W = rgb_img.shape[:2]
+    leaf_bool = (leaf_mask > 0) if leaf_mask is not None else np.ones((H, W), dtype=bool)
+    n_leaf = int(np.sum(leaf_bool))
+    if n_leaf == 0:
+        return {
+            "leaf_bool": leaf_bool,
+            "L": lab_img[:, :, 0],
+            "a": lab_img[:, :, 1],
+            "b": lab_img[:, :, 2],
+            "exg": np.zeros((H, W), dtype=np.float32),
+            "rg": np.zeros((H, W), dtype=np.float32),
+            "base_L": 50.0, "base_a": -15.0, "base_b": 20.0, "base_exg": 40.0, "base_rg": -15.0,
+            "sigma_L": 6.0, "sigma_a": 3.0, "sigma_b": 3.5, "sigma_exg": 12.0, "sigma_rg": 10.0,
+        }
+
+    r = rgb_img[:, :, 0].astype(np.float32)
+    g = rgb_img[:, :, 1].astype(np.float32)
+    b_rgb = rgb_img[:, :, 2].astype(np.float32)
+    exg = 2.0 * g - r - b_rgb
+    rg = r - g
+    nrg = (r - g) / (r + g + 8.0)
+
+    L_ch = lab_img[:, :, 0]
+    a_ch = lab_img[:, :, 1]
+    b_ch = lab_img[:, :, 2]
+
+    # Chọn mô xanh khỏe đại diện trên chính lá; nếu > 92% lá bị vàng/cháy, lấy 20% vùng xanh nhất
+    green_cands = leaf_bool & (a_ch <= -5.0) & (exg > 0.0)
+    n_green = int(np.sum(green_cands))
+    if n_green >= max(25, int(0.08 * n_leaf)):
+        healthy_ref = green_cands
+    elif n_green >= 20 and float(np.median(a_ch[leaf_bool])) > -4.0:
+        healthy_ref = green_cands
+    else:
+        a_leaf = a_ch[leaf_bool]
+        q25 = float(np.percentile(a_leaf, 25))
+        healthy_ref = leaf_bool & (a_ch <= max(q25, -4.0))
+        if int(np.sum(healthy_ref)) == 0:
+            healthy_ref = leaf_bool
+
+    def _med_mad(arr: np.ndarray, min_sig: float, max_sig: float) -> Tuple[float, float]:
+        vals = arr[healthy_ref]
+        med = float(np.median(vals))
+        mad = 1.4826 * float(np.median(np.abs(vals - med)))
+        return med, float(np.clip(mad, min_sig, max_sig))
+
+    base_L, sigma_L = _med_mad(L_ch, 4.0, 18.0)
+    base_a, sigma_a = _med_mad(a_ch, 2.2, 12.0)
+    base_b, sigma_b = _med_mad(b_ch, 2.5, 14.0)
+    base_exg, sigma_exg = _med_mad(exg, 8.0, 40.0)
+    base_rg, sigma_rg = _med_mad(rg, 6.0, 35.0)
+    base_nrg, sigma_nrg = _med_mad(nrg, 0.025, 0.14)
+
+    return {
+        "leaf_bool": leaf_bool,
+        "L": L_ch,
+        "a": a_ch,
+        "b": b_ch,
+        "exg": exg,
+        "rg": rg,
+        "nrg": nrg,
+        "base_L": base_L,
+        "base_a": base_a,
+        "base_b": base_b,
+        "base_exg": base_exg,
+        "base_rg": base_rg,
+        "base_nrg": base_nrg,
+        "sigma_L": sigma_L,
+        "sigma_a": sigma_a,
+        "sigma_b": sigma_b,
+        "sigma_exg": sigma_exg,
+        "sigma_rg": sigma_rg,
+        "sigma_nrg": sigma_nrg,
+    }
+
+
+def _evaluate_adaptive_disease_conditions(
+    stats: Dict[str, Any],
+    sens: float,
+) -> Dict[str, np.ndarray]:
+    """Đánh giá đồng thời Z-score thích nghi và Cổng chênh lệch tuyệt đối tối thiểu."""
+    L = stats["L"]
+    a = stats["a"]
+    b = stats["b"]
+    exg = stats["exg"]
+    rg = stats["rg"]
+    nrg = stats["nrg"]
+
+    da = a - stats["base_a"]
+    db = b - stats["base_b"]
+    d_exg = stats["base_exg"] - exg
+    d_rg = rg - stats["base_rg"]
+    d_nrg = nrg - stats["base_nrg"]
+    d_L_dark = stats["base_L"] - L
+
+    z_a = da / stats["sigma_a"]
+    z_b = db / stats["sigma_b"]
+    z_exg = d_exg / stats["sigma_exg"]
+    z_nrg = d_nrg / stats["sigma_nrg"]
+    z_dark = d_L_dark / stats["sigma_L"]
+
+    z_thr = 3.2 - 1.0 * sens  # ~2.55 tại sens=0.65
+
+    # Bảo vệ vùng bóng râm xanh khỏe (g - r vẫn vượt trội dù L* tối làm Lab a* co về 0)
+    is_dark_green_shadow = (nrg <= -0.075) & (d_nrg < 0.08)
+
+    # 1. Hoại tử Đỏ-Nâu / Gỉ sắt: vượt Z-score lẫn độ lệch tuyệt đối so với mô nền
+    cond_red_brown = (
+        (z_a >= z_thr)
+        & (z_exg >= 0.70 * z_thr)
+        & (z_nrg >= 0.80 * z_thr)
+        & (da >= (11.0 - 2.0 * sens))
+        & (d_exg >= (22.0 - 4.0 * sens))
+        & (d_nrg >= (0.095 - 0.02 * sens))
+        & (a > -5.5)
+    )
+
+    # 2. Cháy lá / Thối đen tối màu (Late Blight / Black Rot) - miễn nhiễm bóng râm xanh tối
+    cond_dark_blight = (
+        (z_dark >= z_thr)
+        & (z_nrg >= 0.80 * z_thr)
+        & (~is_dark_green_shadow)
+        & (d_L_dark >= (14.0 - 3.0 * sens))
+        & (d_nrg >= (0.095 - 0.02 * sens))
+        & (da >= (5.5 - 1.0 * sens))
+        & (L < max(46.0, stats["base_L"] - 10.0))
+    )
+
+    # 3. Quầng vàng bệnh lý (Chlorotic Halo): dịch vàng b* lẫn dịch đỏ-xanh da & R-G
+    cond_yellow_halo = (
+        (z_a >= 0.85 * z_thr)
+        & (z_b >= 0.65 * z_thr)
+        & (da >= (10.5 - 2.0 * sens))
+        & (db >= (8.0 - 2.0 * sens))
+        & (d_rg >= (26.0 - 5.0 * sens))
+        & (b >= max(28.0, stats["base_b"] + 5.0 - 2.0 * sens))
+    )
+
+    # 4. Tâm bệnh khô trắng / bạc màu (Bleached / Tan Center)
+    cond_bleached = (
+        (z_a >= z_thr)
+        & (z_exg >= z_thr)
+        & (da >= (14.0 - 2.0 * sens))
+        & (d_exg >= 35.0)
+        & (a >= -3.5)
+        & (rg >= -5.0)
+    )
+
+    # Bảo vệ vùng chói bóng nắng xanh khỏe & vùng mô xanh thuần
+    is_green_glare = (L > max(76.0, stats["base_L"] + 18.0)) & (a < -4.5) & (rg < 0.0)
+    is_healthy_green = ((a <= min(-8.0, stats["base_a"] + 5.0)) & (da < 7.0) & (db < 10.0)) | is_dark_green_shadow
+
+    # Cổng tổng hợp nghiêm ngặt dùng cho K-means & Score Otsu để không bắt nhầm bóng nắng / gân lá khỏe
+    has_min_pathology_shift = (~is_dark_green_shadow) & (
+        ((z_a >= 0.85 * z_thr) & (da >= (10.5 - 2.0 * sens)) & (d_exg >= 20.0) & (d_nrg >= 0.085) & (a > -5.5))
+        | ((z_dark >= 0.85 * z_thr) & (d_L_dark >= (14.0 - 2.5 * sens)) & (d_nrg >= 0.09) & (da >= 5.5))
+        | ((z_a >= 0.80 * z_thr) & (da >= (10.5 - 2.0 * sens)) & (db >= (8.0 - 2.0 * sens)) & (b >= 28.0))
+        | cond_bleached
+    )
+
+    any_direct = cond_red_brown | cond_dark_blight | cond_yellow_halo | cond_bleached
+    return {
+        "any_direct": any_direct,
+        "has_min_pathology_shift": has_min_pathology_shift,
+        "is_green_glare": is_green_glare,
+        "is_healthy_green": is_healthy_green,
+        "z_score_map": np.clip(
+            14.0 * (
+                np.clip(z_a, 0.0, None)
+                + 0.55 * np.clip(z_b, 0.0, None)
+                + 0.50 * np.clip(z_dark, 0.0, None)
+                + 0.65 * np.clip(z_nrg, 0.0, None)
+            ),
+            0.0,
+            255.0,
+        ).astype(np.uint8),
+    }
+
+
 def _fallback_extract_disease_and_healthy_masks(
     rgb_img: np.ndarray,
     labels_2d: np.ndarray,
@@ -323,7 +545,7 @@ def _fallback_extract_disease_and_healthy_masks(
     leaf_mask: Optional[np.ndarray] = None,
     yellow_halo_sensitivity: float = 0.65,
 ) -> Dict[str, Any]:
-    """Fallback phân tích cụm dựa trên cả Tâm nâu (Necrosis) và Quầng vàng (Chlorosis)."""
+    """Fallback phân cụm bệnh lý thích nghi bằng Z-score/MAD trên CIE Lab của chính chiếc lá."""
     H, W = labels_2d.shape
     valid_labels = set(np.unique(labels_2d).tolist())
     valid_cluster_ids = sorted([int(cid) for cid in valid_labels if cid >= 0])
@@ -333,58 +555,87 @@ def _fallback_extract_disease_and_healthy_masks(
         return {"disease_mask": empty, "healthy_mask": empty.copy(), "disease_cluster_ids": []}
 
     sens = float(np.clip(yellow_halo_sensitivity, 0.0, 1.0))
-    halo_rg_ratio = 0.94 - 0.18 * sens
-    necrotic_rg_ratio = 0.90 - 0.08 * sens
-    max_b_ratio = 0.58 + 0.18 * sens
-    min_rg_minus_b = 30.0 - 18.0 * sens
+    lab_img = rgb_to_lab_scratch(rgb_img)
+    stats = _compute_leaf_healthy_baseline(rgb_img, lab_img, leaf_mask=leaf_mask)
 
     c_arr = centroids.astype(np.float32)
-    exg_map: Dict[int, float] = {}
-    rgb_map: Dict[int, tuple] = {}
-
-    for cid in valid_cluster_ids:
+    c_rgb = np.zeros((len(valid_cluster_ids), 1, 3), dtype=np.uint8)
+    for idx, cid in enumerate(valid_cluster_ids):
         if c_arr.shape[1] >= 3:
-            r, g, b = float(c_arr[cid, 0]), float(c_arr[cid, 1]), float(c_arr[cid, 2])
+            c_rgb[idx, 0, :] = np.clip(np.round(c_arr[cid, :3]), 0, 255).astype(np.uint8)
         else:
-            r = g = b = float(c_arr[cid, 0])
-        exg_map[cid] = 2.0 * g - r - b
-        rgb_map[cid] = (r, g, b)
+            v = int(np.clip(round(float(c_arr[cid, 0])), 0, 255))
+            c_rgb[idx, 0, :] = [v, v, v]
+    c_lab = rgb_to_lab_scratch(c_rgb)[:, 0, :]
 
-    # Ước lượng ExG trung vị toàn lá để làm mốc so sánh tâm cụm
-    if leaf_mask is not None and int(np.sum(leaf_mask > 0)) > 0:
-        leaf_rgb = rgb_img[leaf_mask > 0].astype(np.float32)
-        leaf_exg_med = float(np.median(2.0 * leaf_rgb[:, 1] - leaf_rgb[:, 0] - leaf_rgb[:, 2]))
-    else:
-        leaf_exg_med = max(exg_map.values())
-
+    z_thr = 3.0 - 0.9 * sens
+    exg_map: Dict[int, float] = {}
     disease_cluster_ids: List[int] = []
-    for cid in valid_cluster_ids:
-        r, g, b = rgb_map[cid]
-        exg = exg_map[cid]
-        bright = (r + g + b) / 3.0
 
-        is_white_glare = (r > 200.0) and (g > 200.0) and (b > 175.0) and (g >= r * 0.94)
-        is_strong_green = (g > r * 1.28) and (exg > 70.0) and ((r - g) < -25.0)
-        if is_white_glare or is_strong_green:
+    for idx, cid in enumerate(valid_cluster_ids):
+        r, g, b = float(c_rgb[idx, 0, 0]), float(c_rgb[idx, 0, 1]), float(c_rgb[idx, 0, 2])
+        Lc, ac, bc = float(c_lab[idx, 0]), float(c_lab[idx, 1]), float(c_lab[idx, 2])
+        exg = 2.0 * g - r - b
+        rg = r - g
+        nrg = (r - g) / (r + g + 8.0)
+        exg_map[cid] = exg
+
+        da = ac - stats["base_a"]
+        db = bc - stats["base_b"]
+        d_exg = stats["base_exg"] - exg
+        d_rg = rg - stats["base_rg"]
+        d_nrg = nrg - stats["base_nrg"]
+        d_L_dark = stats["base_L"] - Lc
+
+        z_a = da / stats["sigma_a"]
+        z_b = db / stats["sigma_b"]
+        z_exg = d_exg / stats["sigma_exg"]
+        z_nrg = d_nrg / stats["sigma_nrg"]
+        z_dark = d_L_dark / stats["sigma_L"]
+
+        if (Lc > max(76.0, stats["base_L"] + 18.0)) and (ac < -4.5) and (rg < 0.0):
+            continue
+        if ((ac <= min(-8.0, stats["base_a"] + 5.0)) and (da < 7.0) and (db < 10.0)) or (
+            nrg <= -0.075 and d_nrg < 0.08
+        ):
             continue
 
-        # Điều kiện 1: Tâm nâu/đen hoại tử (Necrotic)
         is_necrotic = (
-            (r >= g * necrotic_rg_ratio and bright < 185.0 and b < max(r, g) * 0.90)
-            or (exg < min(30.0, leaf_exg_med - (125.0 - 55.0 * sens)) and r >= g * 0.78 and bright < 175.0)
+            (z_a >= z_thr)
+            and (z_exg >= 0.65 * z_thr)
+            and (z_nrg >= 0.75 * z_thr)
+            and (da >= 10.5 - 2.0 * sens)
+            and (d_exg >= 20.0)
+            and (d_nrg >= 0.085)
+            and (ac > -5.5)
         )
-        # Điều kiện 2: Quầng vàng / vàng cam (Chlorotic Halo)
-        is_yellow_halo = (
-            (r >= g * halo_rg_ratio)
-            and (b < max(r, g) * max_b_ratio)
-            and ((min(r, g) - b) >= min_rg_minus_b)
-            and (max(r, g) >= 70.0)
+        is_dark = (
+            (z_dark >= z_thr)
+            and (z_nrg >= 0.75 * z_thr)
+            and (d_L_dark >= 14.0 - 2.5 * sens)
+            and (d_nrg >= 0.09)
+            and (da >= 5.5 - 1.0 * sens)
+            and (Lc < max(46.0, stats["base_L"] - 10.0))
         )
-
-        if is_necrotic or is_yellow_halo:
+        is_halo = (
+            (z_a >= 0.85 * z_thr)
+            and (z_b >= 0.65 * z_thr)
+            and (da >= 10.0 - 2.0 * sens)
+            and (db >= 8.0 - 2.0 * sens)
+            and (d_rg >= 25.0 - 5.0 * sens)
+            and (bc >= max(28.0, stats["base_b"] + 5.0 - 2.0 * sens))
+        )
+        is_bleached = (
+            (z_a >= z_thr)
+            and (z_exg >= z_thr)
+            and (da >= 13.5 - 2.0 * sens)
+            and (d_exg >= 35.0)
+            and (ac >= -3.5)
+            and (rg >= -5.0)
+        )
+        if is_necrotic or is_dark or is_halo or is_bleached:
             disease_cluster_ids.append(cid)
 
-    # Bảo vệ: giữ lại ít nhất cụm xanh khỏe nhất nếu tất cả đều bị gắn nhãn bệnh
     if len(disease_cluster_ids) == len(valid_cluster_ids) and len(valid_cluster_ids) > 1:
         healthiest_cid = max(valid_cluster_ids, key=lambda c: exg_map[c])
         disease_cluster_ids = [c for c in disease_cluster_ids if c != healthiest_cid]
@@ -419,32 +670,106 @@ def compute_vegetation_feature_map(
     rgb_img: np.ndarray,
     hsv_img: np.ndarray,
 ) -> np.ndarray:
-    """Xây dựng Bản đồ đặc trưng thực vật kết hợp (Vegetation Feature Map) bằng NumPy.
+    """Xây dựng Bản đồ tách tiền cảnh lá (Leaf Foreground Feature Map) bằng khoảng cách màu CIE Lab so với viền ảnh.
 
-    Công thức:
-        ExG = clip(2 * G - R - B, 0, 255)
-        VegMap = clip(round(sqrt(ExG * S)), 0, 255)
-
-    Kết hợp này giữ nguyên độ nổi bật của mô lá xanh lục (ExG cao và S cao)
-    đồng thời triệt tiêu triệt để nền đất/gỗ màu nâu vàng (R > G nên ExG = 0)
-    và nền trắng/xám/đen (S thấp).
-
-    Args:
-        rgb_img: Ảnh RGB `(H, W, 3)` `uint8`.
-        hsv_img: Ảnh HSV `(H, W, 3)` `uint8` (kênh S ở trục 1).
-
-    Returns:
-        np.ndarray: Bản đồ đặc trưng 2D `(H, W)` kiểu `np.uint8`.
+    Thay vì cắt cứng `G - R >= 3` (gây vỡ lá úa vàng và cụt ổ bệnh thối đen sát mép), hàm ước lượng
+    tối đa 4 cụm màu đại diện từ dải viền ngoài khung hình trong không gian CIE L*a*b* rồi tính
+    khoảng cách màu cảm nhận (nhấn mạnh sắc độ `a*, b*` gấp ~35 lần độ sáng `L*`) kết hợp khử bóng đổ
+    xám trung tính trên nền phòng thí nghiệm và khuếch đại sắc xanh thực vật.
     """
-    r = rgb_img[:, :, 0].astype(np.float32)
-    g = rgb_img[:, :, 1].astype(np.float32)
-    b = rgb_img[:, :, 2].astype(np.float32)
+    H, W = rgb_img.shape[:2]
+    lab = rgb_to_lab_scratch(rgb_img)
+    L = lab[:, :, 0]
+    a = lab[:, :, 1]
+    b = lab[:, :, 2]
 
-    exg = np.clip(2.0 * g - r - b, 0.0, 255.0)
-    sat = hsv_img[:, :, 1].astype(np.float32)
+    border_w = max(3, min(10, int(0.025 * min(H, W))))
+    border_mask = np.zeros((H, W), dtype=bool)
+    border_mask[:border_w, :] = True
+    border_mask[-border_w:, :] = True
+    border_mask[:, :border_w] = True
+    border_mask[:, -border_w:] = True
 
-    veg_map = np.sqrt(exg * sat)
-    return np.clip(np.round(veg_map), 0, 255).astype(np.uint8)
+    border_pts = lab[border_mask]
+    n_border = border_pts.shape[0]
+    if n_border > 2000:
+        step = max(1, n_border // 2000)
+        border_sample = border_pts[::step]
+    else:
+        border_sample = border_pts
+
+    # Phân cụm nhẹ tối đa 4 màu nền ở dải viền bằng NumPy (xử lý đa phông nền như đất nâu + nền trắng/vàng)
+    k_bg = min(4, border_sample.shape[0])
+    idx_init = np.linspace(0, border_sample.shape[0] - 1, k_bg, dtype=int)
+    centers = border_sample[idx_init].copy()
+    bg_labels = np.zeros(border_sample.shape[0], dtype=np.int32)
+
+    for _ in range(12):
+        diffs = border_sample[:, None, :] - centers[None, :, :]
+        sq_dists = (
+            0.08 * (diffs[:, :, 0] ** 2)
+            + 1.60 * (diffs[:, :, 1] ** 2)
+            + 1.40 * (diffs[:, :, 2] ** 2)
+        )
+        new_labels = np.argmin(sq_dists, axis=1)
+        if np.array_equal(new_labels, bg_labels) and _ > 0:
+            break
+        bg_labels = new_labels
+        for j in range(k_bg):
+            pts_j = border_sample[bg_labels == j]
+            if pts_j.shape[0] > 0:
+                centers[j] = np.mean(pts_j, axis=0)
+
+    counts = np.bincount(bg_labels, minlength=k_bg)
+    non_green_border_frac = float(np.mean(border_sample[:, 1] > -5.0))
+
+    # Loại bỏ cụm nhiễu siêu nhỏ (<6% viền) hoặc ngọn/cuống lá xanh nhỏ lỡ chạm viền nền không-xanh
+    valid_protos: List[np.ndarray] = []
+    for j in range(k_bg):
+        frac = float(counts[j]) / max(1, border_sample.shape[0])
+        if frac < 0.06:
+            continue
+        if non_green_border_frac >= 0.65 and float(centers[j, 1]) < -6.0 and frac < 0.25:
+            continue
+        valid_protos.append(centers[j])
+
+    if not valid_protos:
+        best_j = int(np.argmax(counts))
+        valid_protos = [centers[best_j]]
+
+    proto_arr = np.stack(valid_protos, axis=0).astype(np.float32)  # (P, 3)
+
+    # Tính khoảng cách màu tối thiểu tới các nguyên mẫu nền
+    min_dist_sq = np.full((H, W), np.inf, dtype=np.float32)
+    for j in range(proto_arr.shape[0]):
+        d_sq = (
+            0.04 * ((L - proto_arr[j, 0]) ** 2)
+            + 1.60 * ((a - proto_arr[j, 1]) ** 2)
+            + 1.40 * ((b - proto_arr[j, 2]) ** 2)
+        )
+        min_dist_sq = np.minimum(min_dist_sq, d_sq)
+
+    min_dist = np.sqrt(np.clip(min_dist_sq, 0.0, None))
+
+    # Khử bóng đổ xám/tối trung tính trên nền studio khi viền nền không phải nền vàng
+    bg_med_b = float(np.median(border_sample[:, 2]))
+    bg_med_a = float(np.median(border_sample[:, 1]))
+    if bg_med_b < 14.0 and abs(bg_med_a) < 14.0:
+        is_cast_shadow = (
+            ((L < 30.0) & (a > -3.5) & (b < 4.5))
+            | ((L < 34.0) & (a > -2.5) & (b < 8.0) & (np.hypot(a, b) < 9.5))
+        )
+        min_dist = np.where(is_cast_shadow, min_dist * 0.15, min_dist)
+
+    # Nén mềm Michaelis-Menten theo tỷ lệ tương phản nền-lá (k_half=28): giữ ổ bệnh & vùng chói, gọt nhiễu rìa
+    fg = np.where(min_dist >= 5.8, min_dist, 0.0)
+    fg_scaled = np.where(fg > 0.0, 225.0 * (fg / (fg + 28.0)), 0.0)
+    veg_boost = np.where(
+        (min_dist >= 5.8) & (a < -3.0),
+        np.clip((-a - 3.0) * 1.1, 0.0, 30.0),
+        0.0,
+    )
+    return np.clip(np.round(fg_scaled + veg_boost), 0, 255).astype(np.uint8)
 
 
 def build_pathology_feature_space(
@@ -482,12 +807,14 @@ def detect_pathology_disease_mask(
     yellow_halo_sensitivity: float = 0.65,
     fallback_tracker: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Kết hợp cụm K-means, Otsu trên bản đồ `(R - G)` và quy tắc màu Tâm nâu + Quầng vàng.
+    """Phát hiện tổn thương thích nghi theo phân phối mô nền của từng lá (Adaptive Z-score / Robust MAD + Otsu).
 
-    Giúp bắt trọn đồng thời:
-        - Tâm nâu/đen hoại tử (Necrosis)
-        - Quầng vàng/vàng cam (Chlorosis Halo) bao quanh đốm bệnh
-        - Đốm bệnh nhỏ (< 3% diện tích lá) trên mặt lá bóng nắng (chặn nhiễu chói trắng)
+    Bắt trọn đồng thời 4 dạng tổn thương bên trong `leaf_mask` mà không dùng ngưỡng tĩnh `R > G * 0.82/0.90`:
+        1. Hoại tử Đỏ-Nâu / Gỉ sắt (Red-Brown / Rust Necrosis)
+        2. Hoại tử Tối / Cháy lá (Dark Blight / Black Rot)
+        3. Quầng vàng bệnh lý (Chlorotic Halo)
+        4. Tâm bệnh khô trắng / bạc màu (Bleached / Tan Center)
+    Chỉ xác nhận điểm bệnh khi thỏa đồng thời ngưỡng Z-score tương đối và Minimum Absolute Delta Gate.
     """
     leaf_bool = leaf_mask > 0
     if int(np.sum(leaf_bool)) == 0:
@@ -495,61 +822,19 @@ def detect_pathology_disease_mask(
         return {"disease_mask": empty, "healthy_mask": empty.copy(), "rg_otsu_threshold": 0}
 
     sens = float(np.clip(yellow_halo_sensitivity, 0.0, 1.0))
+    lab_img = rgb_to_lab_scratch(blurred_rgb)
+    stats = _compute_leaf_healthy_baseline(blurred_rgb, lab_img, leaf_mask=leaf_mask)
+    conds = _evaluate_adaptive_disease_conditions(stats, sens=sens)
 
-    r = blurred_rgb[:, :, 0].astype(np.float32)
-    g = blurred_rgb[:, :, 1].astype(np.float32)
-    b = blurred_rgb[:, :, 2].astype(np.float32)
+    score_otsu_res = call_otsu(conds["z_score_map"], roi_mask=leaf_mask, fallback_tracker=fallback_tracker)
+    score_otsu_mask = (score_otsu_res["binary_mask"] > 0) & conds["has_min_pathology_shift"]
 
-    exg = 2.0 * g - r - b
-    rg_diff = r - g
-    brightness = (r + g + b) / 3.0
-
-    median_exg = float(np.median(exg[leaf_bool]))
-    median_rg = float(np.median(rg_diff[leaf_bool]))
-
-    # Phân ngưỡng Otsu trên bản đồ chỉ số bệnh học (R - G) bên trong vùng leaf_mask
-    rg_shift = np.clip(np.round(128.0 + rg_diff), 0.0, 255.0).astype(np.uint8)
-    rg_otsu_res = call_otsu(rg_shift, roi_mask=leaf_mask, fallback_tracker=fallback_tracker)
-    rg_otsu_mask = rg_otsu_res["binary_mask"] > 0
-
-    # Các ngưỡng màu học động theo thanh trượt Yellow Halo Sensitivity (0.0 .. 1.0)
-    necrotic_ratio = 0.90 - 0.08 * sens     # ~0.85 tại sens=0.65
-    halo_ratio = 0.94 - 0.18 * sens         # ~0.82 tại sens=0.65
-    max_b_ratio = 0.58 + 0.18 * sens        # ~0.70 tại sens=0.65
-    min_rg_minus_b = 30.0 - 18.0 * sens     # ~18.3 tại sens=0.65
-    exg_drop = 125.0 - 55.0 * sens          # ~89.2 tại sens=0.65
-
-    # Chống nhiễu vùng trắng chói nắng (R, G, B đều cao và G >= R) & vùng lá xanh đậm khỏe mạnh
-    is_white_glare = (r > 200.0) & (g > 200.0) & (b > 175.0) & (g >= r * 0.94)
-    is_strong_green = (g > r * (1.30 - 0.05 * sens)) & (exg > 70.0) & (rg_diff < -25.0)
-
-    # 1. Tâm nâu / đen hoại tử (Necrosis)
-    cond_necrotic = (
-        (r >= g * necrotic_ratio) & (brightness < 185.0) & (b < np.maximum(r, g) * 0.90)
-    ) | (
-        (exg < min(30.0, median_exg - exg_drop)) & (r >= g * 0.78) & (brightness < 175.0)
-    )
-
-    # 2. Quầng vàng / vàng cam (Chlorosis Halo)
-    cond_yellow_halo = (
-        (r >= g * halo_ratio)
-        & (b < np.maximum(r, g) * max_b_ratio)
-        & ((np.minimum(r, g) - b) >= min_rg_minus_b)
-        & (np.maximum(r, g) >= 70.0)
-    )
-
-    # 3. Kết hợp Otsu trên bản đồ (R - G) có khóa bảo vệ màu bệnh học
-    cond_rg_otsu = (
-        rg_otsu_mask
-        & (r >= g * (halo_ratio - 0.03 * sens))
-        & (b < np.maximum(r, g) * max_b_ratio)
-        & (rg_diff > median_rg + (40.0 - 20.0 * sens))
-    )
-
-    # Hợp nhất cùng mặt nạ từ K-means cluster selection
-    cluster_bool = cluster_disease_mask > 0
-    raw_disease_bool = leaf_bool & (~is_white_glare) & (~is_strong_green) & (
-        cluster_bool | cond_necrotic | cond_yellow_halo | cond_rg_otsu
+    cluster_bool = (cluster_disease_mask > 0) & conds["has_min_pathology_shift"]
+    raw_disease_bool = (
+        leaf_bool
+        & (~conds["is_green_glare"])
+        & (~conds["is_healthy_green"])
+        & (conds["any_direct"] | cluster_bool | score_otsu_mask)
     )
 
     disease_mask = np.where(raw_disease_bool, 255, 0).astype(np.uint8)
@@ -558,7 +843,7 @@ def detect_pathology_disease_mask(
     return {
         "disease_mask": disease_mask,
         "healthy_mask": healthy_mask,
-        "rg_otsu_threshold": int(rg_otsu_res["threshold"]),
+        "rg_otsu_threshold": int(score_otsu_res["threshold"]),
     }
 
 
@@ -705,34 +990,46 @@ def call_color_clustering(
 def run_full_diagnosis_pipeline(
     file_source: Union[str, Path, np.ndarray, Any],
     k_clusters: int = 4,
-    blur_kernel: int = 5,
+    blur_kernel: Optional[int] = None,
     blur_sigma: float = 1.0,
-    min_lesion_area: int = 20,
-    morph_kernel: int = 5,
+    min_lesion_area: Optional[int] = None,
+    morph_kernel: Optional[int] = None,
     yellow_halo_sensitivity: float = 0.65,
     run_benchmark_comparison: bool = True,
 ) -> Dict[str, Any]:
-    """Thực thi toàn bộ quy trình chẩn đoán sức khỏe lá cây (nâng cấp chống nhiễu nền & bắt quầng vàng).
+    """Thực thi toàn bộ quy trình chẩn đoán sức khỏe lá cây (nâng cấp Lab Border + Adaptive Z-score + Small-Hole BFS).
 
     Args:
         file_source: Đường dẫn file ảnh, mảng NumPy RGB `(H, W, 3)` hoặc `(H, W)`, hoặc đối tượng upload buffer.
         k_clusters: Số cụm K-means trong không gian đặc trưng bệnh học (mặc định: 4).
-        blur_kernel: Kích thước kernel lọc Gauss làm mịn (mặc định: 5).
+        blur_kernel: Kích thước kernel Gauss; `None` tự chọn `3` cho ảnh `<= 320px` và `5` cho ảnh lớn hơn.
         blur_sigma: Độ lệch chuẩn sigma của kernel lọc Gauss (mặc định: 1.0).
-        min_lesion_area: Ngưỡng diện tích điểm ảnh tối thiểu để công nhận ổ bệnh (mặc định: 20).
-        morph_kernel: Kích thước kernel cho phép đóng Closing gom quầng vàng + tâm nâu (mặc định: 5).
+        min_lesion_area: Ngưỡng diện tích ổ bệnh tối thiểu; `None` tự co giãn tỷ lệ kích thước ảnh (`~8 px` trên `256x256`).
+        morph_kernel: Kích thước kernel Closing; `None` tự chọn `3` cho ảnh `<= 320px` và `5` cho ảnh lớn hơn.
         yellow_halo_sensitivity: Độ nhạy bao phủ quầng vàng xung quanh ổ bệnh từ `0.0` đến `1.0` (mặc định: 0.65).
         run_benchmark_comparison: Cờ kích hoạt chạy đối sánh định lượng với OpenCV (mặc định: True).
 
     Returns:
         Dict[str, Any]: Dictionary chuẩn chứa kết quả các tầng xử lý, mặt nạ, chẩn đoán y bạ và benchmark.
+        cluster_color_result giữ nguyên kết quả H2 trước fusion (kể cả uncertain_mask
+        và metadata); color_result vẫn là kết quả Lab/MAD fusion của pipeline.
     """
     fallback_modules: List[str] = []
 
-    # 1. Nạp ảnh & Tiền xử lý
+    # 1. Nạp ảnh & Tự động co giãn siêu tham số theo độ phân giải thực tế
     loaded_img = call_load_image(file_source, max_size=512, fallback_tracker=fallback_modules)
+    H_in, W_in = loaded_img.shape[:2]
+    is_small_img = max(H_in, W_in) <= 320
+    eff_blur_kernel = int(blur_kernel) if blur_kernel is not None else (3 if is_small_img else 5)
+    eff_min_area = (
+        int(min_lesion_area)
+        if min_lesion_area is not None
+        else max(6, min(20, int(round(0.00012 * H_in * W_in))))
+    )
+    eff_morph_kernel = int(morph_kernel) if morph_kernel is not None else (3 if is_small_img else 5)
+
     prep = call_preprocess(
-        loaded_img, blur_kernel=blur_kernel, blur_sigma=blur_sigma, fallback_tracker=fallback_modules
+        loaded_img, blur_kernel=eff_blur_kernel, blur_sigma=blur_sigma, fallback_tracker=fallback_modules
     )
     rgb_img = prep["original_rgb"]
     blurred_rgb = prep["blurred_rgb"]
@@ -740,18 +1037,33 @@ def run_full_diagnosis_pipeline(
     hsv_img = prep["hsv"]
     otsu_channel = prep["otsu_input"]
 
-    # 2. Giai đoạn 1: Tách nền bằng Otsu trên Vegetation Feature Map -> Lọc thành phần lớn nhất -> Lấp lỗ thủng BFS
+    # 2. Giai đoạn 1: Tách khung phiến lá (Border Lab Otsu) -> Closing -> Lấp lỗ nội vùng -> Cắt cuống lá mảnh (Petiole Removal)
     otsu_res = call_otsu(otsu_channel, fallback_tracker=fallback_modules)
     H, W = gray_img.shape
-    roi_close_k = 11 if min(H, W) >= 128 else 7
-    leaf_closed = closing_scratch(otsu_res["binary_mask"], kernel_size=roi_close_k)
-    leaf_main = keep_largest_connected_component_scratch(leaf_closed)
-    leaf_mask = fill_holes_bfs_scratch(leaf_main)
+    core_green_leaf = otsu_res["binary_mask"]
+    leaf_main_core = keep_largest_connected_component_scratch(core_green_leaf, prefer_central=True)
+    roi_close_k = 7 if min(H, W) >= 128 else 5
+    leaf_closed = closing_scratch(leaf_main_core, kernel_size=roi_close_k)
+    leaf_filled = fill_holes_bfs_scratch(leaf_closed)
+
+    leaf_area_pre = int(np.sum(leaf_filled > 0))
+    petiole_k = 11 if min(H, W) <= 320 else 15
+    if leaf_area_pre > max(400, int(0.04 * H * W)):
+        blade_opened = opening_scratch(leaf_filled, kernel_size=petiole_k)
+        blade_core = keep_largest_connected_component_scratch(blade_opened, prefer_central=True)
+        if int(np.sum(blade_core > 0)) >= int(0.45 * leaf_area_pre):
+            restore_k = 9 if min(H, W) <= 320 else 11
+            blade_dilated = dilate_scratch(blade_core, kernel_size=restore_k)
+            leaf_mask = np.where((blade_dilated > 0) & (leaf_filled > 0), 255, 0).astype(np.uint8)
+        else:
+            leaf_mask = leaf_filled
+    else:
+        leaf_mask = leaf_filled
 
     if int(np.sum(leaf_mask > 0)) == 0:
         leaf_mask = np.full((H, W), 255, dtype=np.uint8)
 
-    # 3. Giai đoạn 2: Phân cụm K-Means trên không gian đặc trưng nhạy bệnh học (6 kênh) bên trong leaf_mask
+    # 3. Giai đoạn 2: Phân cụm K-Means + Sàng lọc Adaptive Z-score/MAD trên CIE Lab
     pathology_features = build_pathology_feature_space(blurred_rgb, hsv_img)
     kmeans_raw = call_kmeans(
         pathology_features,
@@ -794,11 +1106,28 @@ def run_full_diagnosis_pipeline(
         "rg_otsu_threshold": pathology_res["rg_otsu_threshold"],
     }
 
-    # 4. Giai đoạn 3: Hình thái học Closing (gom các chấm nâu & quầng vàng) -> Opening nhẹ -> BFS đếm ổ bệnh
-    closed_disease = closing_scratch(color_res["disease_mask"], kernel_size=morph_kernel)
-    open_kernel = min(morph_kernel, 3)
-    morphed_disease = opening_scratch(closed_disease, kernel_size=open_kernel)
-    post_res = connected_components_bfs_scratch(morphed_disease, min_area=min_lesion_area)
+    # 4. Giai đoạn 3: Closing vừa tầm -> Lấp lỗ cục bộ giới hạn diện tích (<= 3% lá) -> Bảo toàn đốm nhỏ & gọt nhiễu viền
+    leaf_area_px = max(1, int(np.sum(leaf_mask > 0)))
+    close_k = max(eff_morph_kernel, 3)
+    closed_disease = closing_scratch(color_res["disease_mask"], kernel_size=close_k)
+    max_hole_area = max(30, int(round(0.03 * leaf_area_px)))
+    filled_disease = fill_small_holes_bfs_scratch(closed_disease, max_hole_area=max_hole_area)
+
+    if eff_min_area > 15:
+        open_kernel = min(eff_morph_kernel, 3)
+        morphed_disease = opening_scratch(filled_disease, kernel_size=open_kernel)
+    else:
+        morphed_disease = filled_disease
+
+    # Gọt bỏ lớp viền giao thoa ở rìa mép lá nhưng giữ lại ổ bệnh sát mép lá thật sự
+    margin_erode_k = 7 if eff_min_area > 15 else 5
+    inner_leaf_mask = erode_scratch(leaf_mask, kernel_size=margin_erode_k)
+    post_res = filter_margin_noise_components_scratch(
+        morphed_disease,
+        inner_mask=inner_leaf_mask,
+        min_area=eff_min_area,
+        min_inner_ratio=0.55,
+    )
     annotated_img = draw_lesion_bboxes_scratch(rgb_img, post_res["bboxes"])
 
     # 5. Giai đoạn 4: Chẩn đoán mức độ bệnh 5 cấp độ
@@ -864,8 +1193,11 @@ def run_full_diagnosis_pipeline(
         "blurred": blurred_rgb,
         "otsu_channel": otsu_channel,
         "otsu_result": otsu_res,
+        "core_green_leaf": core_green_leaf,
         "leaf_mask": leaf_mask,
+        "inner_leaf_mask": inner_leaf_mask,
         "kmeans_result": kmeans_res,
+        "cluster_color_result": cluster_color_res,
         "color_result": color_res,
         "morphed_disease_mask": morphed_disease,
         "postprocess_result": post_res,

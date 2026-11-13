@@ -2,9 +2,9 @@
 import unittest
 from unittest.mock import patch
 import numpy as np
-from src.segmentation.adapter import segment_leaf
-from src.segmentation.kmeans import kmeans_scratch
-from src.segmentation.lesion_extractor import extract_disease_and_healthy_masks
+from src.adapter import segment_leaf
+from src.kmeans import kmeans_scratch
+from src.color_clustering import extract_disease_and_healthy_masks
 
 
 def make_scene(kind='mixed'):
@@ -84,8 +84,8 @@ class AdapterTests(unittest.TestCase):
 
     def test_exact_delegation_and_timings(self):
         image, roi, _ = make_scene()
-        with patch('src.segmentation.adapter.kmeans_scratch', wraps=kmeans_scratch) as km, patch(
-                'src.segmentation.adapter.extract_disease_and_healthy_masks',
+        with patch('src.adapter.kmeans_scratch', wraps=kmeans_scratch) as km, patch(
+                'src.adapter.extract_disease_and_healthy_masks',
                 wraps=extract_disease_and_healthy_masks) as ex:
             r = segment_leaf(image, roi, k=3, max_iter=7, tol=.02, random_state=8, init='k-means++')
             self.assertEqual(km.call_count, 1)

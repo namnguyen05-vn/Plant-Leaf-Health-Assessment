@@ -9,7 +9,7 @@ color_result retains H2's three-way classification before any fusion.
 from time import perf_counter
 import numpy as np
 from .kmeans import kmeans_scratch
-from .lesion_extractor import extract_disease_and_healthy_masks
+from .color_clustering import extract_disease_and_healthy_masks
 
 
 def segment_leaf(rgb_img, roi_mask=None, features=None, k=4, max_iter=100,

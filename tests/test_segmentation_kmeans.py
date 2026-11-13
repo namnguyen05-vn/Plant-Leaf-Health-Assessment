@@ -2,7 +2,7 @@
 
 import unittest
 import numpy as np
-from src.segmentation.kmeans import (
+from src.kmeans import (
     initialize_centroids, compute_euclidean_distances, kmeans_scratch,
 )
 
@@ -314,7 +314,7 @@ class KMeansTests(unittest.TestCase):
             np.testing.assert_array_equal(image, original)
 
     def test_exact_tie_selects_first_center(self):
-        from src.segmentation.kmeans import _assign
+        from src.kmeans import _assign
         channels = np.array([[0, 1, 2]], dtype=np.float32)
         centers = np.array([[0], [2]], dtype=np.float32)
         work = (np.empty(3, np.float32), np.empty(3, np.float32),

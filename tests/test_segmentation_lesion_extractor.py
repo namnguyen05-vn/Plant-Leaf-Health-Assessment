@@ -1,10 +1,10 @@
 """Direct H2 unit and local integration tests; no pipeline/fallback imports."""
 import unittest
 import numpy as np
-from src.segmentation.lesion_extractor import (
+from src.color_clustering import (
     compute_excess_green_index, extract_disease_and_healthy_masks as extract,
 )
-from src.segmentation.kmeans import kmeans_scratch
+from src.kmeans import kmeans_scratch
 
 
 def scene(colors):

@@ -18,7 +18,7 @@ import warnings
 import cv2
 import numpy as np
 
-from src.segmentation.adapter import segment_leaf
+from src.adapter import segment_leaf
 
 
 def configurations(init='random'):

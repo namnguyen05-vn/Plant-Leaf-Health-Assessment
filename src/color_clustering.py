@@ -1,95 +1,133 @@
-"""Color Feature Analysis and Tissue Classification Module.
+"""NumPy color rules for suspected lesions using RGB means inside the ROI.
 
-Module phân tích tọa độ không gian màu của các tâm cụm K-means để tự động phân định
-cụm nào đại diện cho mô lá khỏe mạnh (Healthy Tissue) và cụm nào đại diện cho vết bệnh/hoại tử (Diseased Lesions).
+Color symptoms do not establish disease causes: natural yellow/brown leaves
+can look identical to lesions. Mixed clusters may hide small lesions.
 """
 
-from typing import Any, Dict, List, Optional
 import numpy as np
 
+# RGB, brightness, ExG use 0..255 units; saturation uses 0..1.
+MIN_VISIBLE_VALUE = 45.0  # Darker max(R,G,B) has unreliable color.
+MIN_COLOR_SATURATION = 0.20  # Reject nearly neutral colors.
+GLARE_MIN_CHANNEL = 175.0
+GLARE_MIN_VALUE = 220.0
+GLARE_MAX_SATURATION = 0.22
+HEALTHY_MIN_EXG = 25.0
+HEALTHY_MIN_GREEN_RED_RATIO = 1.15
+HEALTHY_MIN_GREEN_BLUE_RATIO = 1.10
+YELLOW_MIN_RED_GREEN_RATIO = 0.90
+YELLOW_MIN_GREEN_RED_RATIO = 0.80
+YELLOW_MAX_BLUE_RATIO = 0.65  # B/max(R,G).
+YELLOW_MIN_BLUE_DEFICIT = 25.0  # min(R,G)-B: both R and G must exceed B.
+YELLOW_MIN_VALUE = 70.0
+BROWN_MIN_RED_GREEN_RATIO = 1.05
+BROWN_MIN_GREEN_BLUE_RATIO = 1.15
+BROWN_MAX_BRIGHTNESS = 180.0
 
-def compute_excess_green_index(rgb: np.ndarray) -> np.ndarray:
-    """Tính chỉ số sắc xanh vượt trội ExG (Excess Green Index) từ vector màu RGB.
 
-    Công thức:
-        ExG = 2 * G - R - B
+def compute_excess_green_index(rgb):
+    """Return float32 2G-R-B for finite RGB (...,3) in 0..255, without overflow."""
+    if (not isinstance(rgb, np.ndarray) or rgb.ndim < 1 or rgb.shape[-1] != 3
+            or rgb.dtype.kind not in 'uif' or not np.isfinite(rgb).all()
+            or np.any(rgb < 0) or np.any(rgb > 255)):
+        raise ValueError('rgb must be finite numeric (...,3) in 0..255')
+    colors = rgb.astype(np.float32)
+    return 2.0 * colors[..., 1] - colors[..., 0] - colors[..., 2]
 
-    Mô lá khỏe mạnh có hàm lượng diệp lục cao nên ExG > 0 và đạt giá trị lớn.
-    Các vết bệnh (nâu sẫm, vàng úa, đốm đen) có sắc tố lục suy giảm nên ExG thấp hoặc âm.
 
-    Args:
-        rgb: Mảng 1D hoặc 2D chứa các giá trị kênh R, G, B kiểu `float32` hoặc `uint8`.
+def extract_disease_and_healthy_masks(rgb_img, labels_2d, centroids, leaf_mask=None):
+    """Classify clusters using original RGB, never feature center coordinates.
 
-    Returns:
-        np.ndarray: Mảng giá trị ExG tương ứng, kiểu `float32`.
+    Inputs: uint8 RGB (H,W,3), integer labels (H,W) in [-1,K-1], finite
+    real centroids (K,C), C>=1, and optional finite numeric/bool ROI (H,W),
+    membership >0. HSV/Lab/six-channel centers are valid: only K is used.
+    Inputs are not modified. Without ROI, caller asserts all labeled pixels
+    belong to the leaf. Invalid labels are rejected even outside ROI.
 
-    Raises:
-        NotImplementedError: Khi hàm chưa được hiện thực hoàn chỉnh trên nhánh tính năng.
+    Required outputs: disease_mask, healthy_mask (uint8 {0,255}, HxW),
+    disease_cluster_ids (list[int]). Additional uncertain_mask and ID lists
+    distinguish ambiguity from healthy tissue. Label -1 is excluded from all
+    masks. Empty ROI returns zero masks and empty ID lists. cluster_features
+    arrays have K rows indexed by ID; empty clusters have zero numerical
+    features, status/reason 'empty', and belong to no ID list.
     """
-    # =========================================================================
-    # HƯỚNG DẪN TRIỂN KHAI CHO THÀNH VIÊN:
-    # -------------------------------------------------------------------------
-    # Bước 1: Ép kiểu sang float32 để tránh tràn số.
-    # Bước 2: R = rgb[..., 0], G = rgb[..., 1], B = rgb[..., 2].
-    # Bước 3: exg = 2.0 * G - R - B. Trả về exg.
-    # =========================================================================
-    raise NotImplementedError("Hàm compute_excess_green_index cần được cài đặt trong nhánh feat/color-clustering.")
+    if (not isinstance(rgb_img, np.ndarray) or rgb_img.ndim != 3
+            or rgb_img.shape[2] != 3 or 0 in rgb_img.shape or rgb_img.dtype != np.uint8):
+        raise ValueError('rgb_img must be nonempty uint8 RGB (H,W,3)')
+    if (not isinstance(centroids, np.ndarray) or centroids.ndim != 2
+            or 0 in centroids.shape or centroids.dtype.kind not in 'uif'
+            or not np.isfinite(centroids).all()):
+        raise ValueError('centroids must be finite real (K,C), K>=1, C>=1')
+    k = len(centroids)
+    if (not isinstance(labels_2d, np.ndarray) or labels_2d.shape != rgb_img.shape[:2]
+            or labels_2d.dtype.kind not in 'iu'
+            or np.any(labels_2d < -1) or np.any(labels_2d >= k)):
+        raise ValueError('labels_2d must be integer (H,W) in [-1,K-1]')
+    valid = labels_2d >= 0
+    if leaf_mask is not None:
+        if (not isinstance(leaf_mask, np.ndarray) or leaf_mask.shape != valid.shape
+                or leaf_mask.dtype.kind not in 'buif' or not np.isfinite(leaf_mask).all()):
+            raise ValueError('leaf_mask must be finite numeric/bool (H,W)')
+        valid &= leaf_mask > 0
+    labels = labels_2d[valid].astype(np.intp)
+    pixels = rgb_img[valid]
+    counts = np.bincount(labels, minlength=k).astype(np.int64)
+    mean_rgb = np.zeros((k, 3), dtype=np.float32)
+    occupied = counts > 0
+    for c in range(3):
+        sums = np.bincount(labels, weights=pixels[:, c], minlength=k)
+        np.divide(sums, counts, out=mean_rgb[:, c], where=occupied)
+    r, g, b = mean_rgb.T
+    value = mean_rgb.max(axis=1)
+    minimum = mean_rgb.min(axis=1)
+    saturation = np.zeros(k, dtype=np.float32)
+    np.divide(value - minimum, value, out=saturation, where=value > 0)
+    brightness = mean_rgb.mean(axis=1)
+    exg = compute_excess_green_index(mean_rgb)
+    red_green_difference = r - g
+    blue_deficit = np.minimum(r, g) - b
+    shadow = value < MIN_VISIBLE_VALUE
+    glare = ((minimum >= GLARE_MIN_CHANNEL) & (value >= GLARE_MIN_VALUE)
+             & (saturation <= GLARE_MAX_SATURATION))
+    reliable = occupied & ~shadow & ~glare & (saturation >= MIN_COLOR_SATURATION)
+    healthy = (reliable & (exg >= HEALTHY_MIN_EXG)
+               & (g >= HEALTHY_MIN_GREEN_RED_RATIO * r)
+               & (g >= HEALTHY_MIN_GREEN_BLUE_RATIO * b))
+    yellow = (reliable & (r >= YELLOW_MIN_RED_GREEN_RATIO * g)
+              & (g >= YELLOW_MIN_GREEN_RED_RATIO * r)
+              & (b <= YELLOW_MAX_BLUE_RATIO * np.maximum(r, g))
+              & (blue_deficit >= YELLOW_MIN_BLUE_DEFICIT)
+              & (value >= YELLOW_MIN_VALUE))
+    brown = (reliable & (r >= BROWN_MIN_RED_GREEN_RATIO * g)
+             & (g >= BROWN_MIN_GREEN_BLUE_RATIO * b)
+             & (brightness <= BROWN_MAX_BRIGHTNESS))
+    disease = (yellow | brown) & ~healthy
+    uncertain = occupied & ~healthy & ~disease
+    status = np.full(k, 'empty', dtype='<U10')
+    reason = np.full(k, 'empty', dtype='<U24')
+    status[uncertain], reason[uncertain] = 'uncertain', 'ambiguous_color'
+    reason[uncertain & shadow] = 'shadow_or_too_dark'
+    reason[uncertain & glare] = 'glare'
+    reason[uncertain & ~shadow & ~glare & (saturation < MIN_COLOR_SATURATION)] = 'low_saturation'
+    status[healthy], reason[healthy] = 'healthy', 'green'
+    status[disease] = 'disease'
+    reason[disease & brown] = 'brown'
+    reason[disease & yellow] = 'yellow'
 
+    def mask_for(selection):
+        mask = np.zeros(valid.shape, dtype=np.uint8)
+        mask[valid] = selection[labels].astype(np.uint8) * 255
+        return mask
 
-def extract_disease_and_healthy_masks(
-    rgb_img: np.ndarray,
-    labels_2d: np.ndarray,
-    centroids: np.ndarray,
-    leaf_mask: Optional[np.ndarray] = None,
-) -> Dict[str, Any]:
-    """Phân loại các cụm K-means thành vùng mô lá khỏe và vùng vết bệnh dựa trên phân tích màu.
-
-    Quy tắc phân loại:
-    1. Với mỗi tâm cụm c_j (j in [0..k-1]), tính toán các chỉ số sinh học:
-       - Chỉ số xanh ExG_j = 2 * G_j - R_j - B_j.
-       - Chỉ số nâu / vàng úa: Brown_j = R_j - B_j hoặc tỷ lệ R_j / (G_j + 1e-5).
-    2. Cụm có ExG cao nhất được xếp vào lớp mô lá khỏe ("Healthy Leaf").
-    3. Cụm có ExG thấp hơn và màu sắc lệch về gam màu nóng/tối (vàng, nâu, đen, đỏ)
-       được xếp vào lớp vết bệnh ("Disease Lesion").
-    4. Tổng hợp các pixel thuộc các cụm tương ứng để tạo ra hai mặt nạ nhị phân tách biệt.
-
-    Args:
-        rgb_img: Mảng ảnh gốc RGB 3 chiều kích thước `(H, W, 3)`, kiểu `np.uint8`.
-        labels_2d: Bản đồ nhãn cụm 2 chiều kích thước `(H, W)`, kiểu `np.int32`
-            với giá trị nhãn từ `0` đến `k-1` (hoặc `-1` nếu là điểm ngoài lá).
-        centroids: Mảng 2 chiều kích thước `(k, C)` chứa màu tâm cụm, kiểu `np.float32`.
-        leaf_mask: (Tùy chọn) Mặt nạ nhị phân lá cây `(H, W)`, kiểu `np.uint8` `{0, 255}`.
-            Nếu cung cấp, chỉ xét phân loại trên vùng diện tích thuộc lá cây.
-
-    Returns:
-        Dict[str, Any]: Dictionary chuẩn chứa các khóa:
-            - "disease_mask": np.ndarray kích thước `(H, W)`, kiểu `np.uint8`,
-              chỉ nhận hai giá trị `{0, 255}`. Giá trị 255 đại diện cho các điểm ảnh vết bệnh.
-            - "healthy_mask": np.ndarray kích thước `(H, W)`, kiểu `np.uint8`,
-              chỉ nhận hai giá trị `{0, 255}`. Giá trị 255 đại diện cho mô lá xanh khỏe mạnh.
-            - "disease_cluster_ids": List[int], danh sách chỉ số (ID) các cụm được xếp vào lớp bệnh.
-
-    Raises:
-        ValueError: Nếu kích thước `labels_2d` không khớp với `rgb_img`.
-        NotImplementedError: Khi hàm chưa được hiện thực hoàn chỉnh trên nhánh tính năng.
-
-    Note:
-        - QUY TẮC: Xử lý bằng NumPy vector hóa, không dùng vòng lặp duyệt qua từng điểm ảnh.
-        - Phải đảm bảo không nhận nhầm vùng nền (background) vào vùng bệnh bằng cách kiểm tra `leaf_mask`.
-    """
-    # =========================================================================
-    # HƯỚNG DẪN TRIỂN KHAI CHO THÀNH VIÊN:
-    # -------------------------------------------------------------------------
-    # Bước 1: Tính chỉ số ExG cho từng centroid trong centroids.
-    # Bước 2: Xác định cluster_healthy = int(np.argmax(exg_scores)).
-    # Bước 3: Các cluster còn lại có ExG < ngưỡng hoặc tỷ lệ nâu/vàng cao được xếp vào disease_cluster_ids.
-    # Bước 4: Tạo mặt nạ `healthy_mask`: khởi tạo mảng 0, gán 255 tại `labels_2d == cluster_healthy`.
-    # Bước 5: Tạo mặt nạ `disease_mask`: gán 255 tại các pixel có label nằm trong disease_cluster_ids.
-    # Bước 6: Nếu có leaf_mask, áp dụng phép toán AND bitwise:
-    #         disease_mask = np.where(leaf_mask > 0, disease_mask, 0).astype(np.uint8)
-    #         healthy_mask = np.where(leaf_mask > 0, healthy_mask, 0).astype(np.uint8)
-    # Bước 7: Trả về kết quả theo chuẩn Data Contract.
-    # =========================================================================
-    raise NotImplementedError(
-        "Hàm extract_disease_and_healthy_masks cần được cài đặt trong nhánh feat/color-clustering."
-    )
+    return {
+        'disease_mask': mask_for(disease), 'healthy_mask': mask_for(healthy),
+        'disease_cluster_ids': np.flatnonzero(disease).tolist(),
+        'healthy_cluster_ids': np.flatnonzero(healthy).tolist(),
+        'uncertain_cluster_ids': np.flatnonzero(uncertain).tolist(),
+        'uncertain_mask': mask_for(uncertain),
+        'cluster_features': dict(rgb_mean=mean_rgb, pixel_count=counts, exg=exg,
+                                 red_green_difference=red_green_difference,
+                                 blue_deficit=blue_deficit, brightness=brightness,
+                                 saturation=saturation, value=value,
+                                 status=status, reason=reason),
+    }

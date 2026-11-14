@@ -40,7 +40,7 @@ flowchart TD
 ## 2. Cấu trúc mã nguồn
 
 ```text
-E:\BTL XLA\
+Plant-Leaf-Health-Assessment/
 ├── README.md                       # Tài liệu tổng quan kiến trúc, Data Contracts và Git Workflow
 ├── requirements.txt                # Danh mục thư viện phụ thuộc
 ├── .gitignore                      # Cấu hình bỏ qua file nhị phân, cache và output
@@ -49,6 +49,7 @@ E:\BTL XLA\
 │   └── outputs/                    # Thư mục lưu ảnh phân đoạn và kết quả xuất ra (.gitkeep)
 ├── src/
 │   ├── __init__.py                 # Khởi tạo package src
+│   ├── adapter.py                  # Cầu nối K-means → phân loại tổn thương độc lập
 │   ├── data_io.py                  # Đọc/lưu ảnh và chuyển đổi ma trận CSV hai chiều
 │   ├── preprocess.py               # Chuyển đổi RGB sang Gray/HSV, lọc Gauss và Mean scratch
 │   ├── otsu.py                     # Thuật toán phân ngưỡng tự động Otsu 256 mức xám scratch
@@ -59,11 +60,35 @@ E:\BTL XLA\
 │   └── pipeline.py                 # Điều phối tích hợp toàn trình (End-to-End Pipeline)
 ├── tests/
 │   ├── __init__.py
-│   └── test_contracts.py           # Bộ kiểm thử tự động Data Contracts (kiểu, shape, runtime)
+│   ├── test_contracts.py           # Bộ kiểm thử tự động Data Contracts (kiểu, shape, runtime)
+│   ├── test_segmentation_*.py      # Kiểm thử K-means, phân loại màu và adapter
+│   ├── test_kmeans_survey.py
+│   └── test_pipeline_h1_h2_integration.py
+├── experiments/                   # Khảo sát K-means độc lập
+│   ├── __init__.py
+│   └── kmeans_survey.py            # So sánh RGB/HSV/Lab với K=2..5
 └── app.py                          # Ứng dụng Streamlit trực quan hóa tương tác
 ```
 
 ---
+
+Các thuật toán phân đoạn dùng `src.kmeans` và `src.color_clustering` theo cấu
+trúc phẳng của main. `src.adapter.segment_leaf` kết nối hai module để khảo sát
+độc lập, giữ nguyên các kênh đặc trưng và phân loại ba trạng thái
+`disease_mask`, `healthy_mask`, `uncertain_mask`. Pipeline sử dụng các module
+chuẩn này; các tầng chưa triển khai vẫn dùng fallback hiện có.
+Pipeline giữ kết quả H2 trước fusion trong `cluster_color_result`, bao gồm
+`uncertain_mask` và metadata. `color_result` vẫn là kết quả fusion Lab/MAD;
+benchmark tiếp tục đối sánh scratch với OpenCV theo kiến trúc của main.
+
+Chạy từ thư mục gốc repository:
+
+```powershell
+python -m pytest -q
+python -m experiments.kmeans_survey --help
+python -m experiments.kmeans_survey --synthetic --output data/outputs/survey_run001
+python -m streamlit run app.py
+```
 
 ## 3. Quy chuẩn giao tiếp dữ liệu (Data Contracts)
 
@@ -94,6 +119,7 @@ Nhằm phục vụ mục đích học thuật và nắm vững bản chất toá
 2. OpenCV chỉ được phép sử dụng ở:
    - Module `src/benchmark.py` (`run_opencv_otsu`, `run_opencv_kmeans`) để tạo mốc so sánh hiệu năng (baseline đối chứng).
    - Đọc/ghi ảnh cơ bản trong `src/data_io.py`.
+   - Công cụ thực nghiệm `experiments/kmeans_survey.py`: chuyển RGB/HSV/Lab, đọc/ghi ảnh và vẽ bảng so sánh.
 3. Tận dụng triệt để sức mạnh **vector hóa của NumPy (Broadcasting, ufunc)** để tối ưu tốc độ tính toán, đảm bảo thời gian phân cụm K-means không vượt quá 2-3 giây trên ảnh 512x512.
 
 ---

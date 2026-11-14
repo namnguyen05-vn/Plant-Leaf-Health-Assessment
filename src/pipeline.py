@@ -1011,6 +1011,8 @@ def run_full_diagnosis_pipeline(
 
     Returns:
         Dict[str, Any]: Dictionary chuẩn chứa kết quả các tầng xử lý, mặt nạ, chẩn đoán y bạ và benchmark.
+        cluster_color_result giữ nguyên kết quả H2 trước fusion (kể cả uncertain_mask
+        và metadata); color_result vẫn là kết quả Lab/MAD fusion của pipeline.
     """
     fallback_modules: List[str] = []
 
@@ -1195,6 +1197,7 @@ def run_full_diagnosis_pipeline(
         "leaf_mask": leaf_mask,
         "inner_leaf_mask": inner_leaf_mask,
         "kmeans_result": kmeans_res,
+        "cluster_color_result": cluster_color_res,
         "color_result": color_res,
         "morphed_disease_mask": morphed_disease,
         "postprocess_result": post_res,

@@ -66,7 +66,10 @@ Plant-Leaf-Health-Assessment/
 │   └── test_pipeline_h1_h2_integration.py
 ├── experiments/                   # Khảo sát K-means độc lập
 │   ├── __init__.py
-│   └── kmeans_survey.py            # So sánh RGB/HSV/Lab với K=2..5
+│   ├── kmeans_survey.py            # So sánh RGB/HSV/Lab với K=2..5
+│   ├── build_dataset.py            # Sinh dataset 30 ảnh có Ground Truth (data/raw/)
+│   ├── otsu_analysis.py            # Phân tích Histogram & Otsu scratch vs OpenCV
+│   └── results/otsu/               # Biểu đồ, bảng số liệu và báo cáo Vai trò 2
 └── app.py                          # Ứng dụng Streamlit trực quan hóa tương tác
 ```
 
@@ -87,6 +90,8 @@ Chạy từ thư mục gốc repository:
 python -m pytest -q
 python -m experiments.kmeans_survey --help
 python -m experiments.kmeans_survey --synthetic --output data/outputs/survey_run001
+python -m experiments.build_dataset      # sinh lại 30 ảnh + Ground Truth vào data/raw/
+python -m experiments.otsu_analysis      # Histogram đa kênh + Otsu vs OpenCV -> experiments/results/otsu/
 python -m streamlit run app.py
 ```
 

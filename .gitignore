@@ -59,3 +59,10 @@ data/outputs/*
 !data/outputs/.gitkeep
 data/raw/*
 !data/raw/.gitkeep
+# Dataset chuẩn của dự án (Vai trò 2) — được commit lên GitHub
+!data/raw/*.jpg
+!data/raw/metadata.csv
+!data/raw/README.md
+!data/raw/ground_truth/
+!data/raw/csv/
+!data/raw/real/

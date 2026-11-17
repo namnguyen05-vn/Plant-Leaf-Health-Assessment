@@ -1,0 +1,6 @@
+operation,image,scratch_ms,opencv_ms,ratio,max_abs_diff
+RGB→Gray,512x512,2.199,0.064,34.2,1
+RGB→HSV,512x512,41.105,0.234,175.3,
+Gaussian 5x5 (RGB),512x512,15.832,0.402,39.4,1
+Mean 5x5 (Gray),512x512,5.331,0.105,51.0,0
+Otsu (Gray),512x512,0.873,0.187,4.7,0

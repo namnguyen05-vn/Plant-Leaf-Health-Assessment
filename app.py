@@ -4,7 +4,9 @@ Giao diện SaaS / AgriTech hiện đại chuẩn Figma kết nối với `src/p
 `src/postprocess.py`, `src/benchmark.py` và các module xử lý ảnh `src/`.
 """
 
+import csv
 import io
+from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional, Tuple
 import matplotlib.pyplot as plt
@@ -776,6 +778,89 @@ def render_metrics_summary_df(
     )
 
 
+# Đường dẫn gốc thư mục dự án
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def get_real_dataset_options(project_root: Path) -> Dict[str, str]:
+    """Lấy danh sách ảnh lá thật kèm thông tin nhãn lâm sàng từ data/raw/real/."""
+    real_dir = project_root / "data" / "raw" / "real"
+    meta_file = real_dir / "metadata_real.csv"
+    meta_info: Dict[str, Dict[str, str]] = {}
+    if meta_file.exists():
+        try:
+            with open(meta_file, mode="r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    fname = row.get("filename", "").strip()
+                    if fname:
+                        meta_info[fname] = row
+        except Exception:
+            pass
+
+    options: Dict[str, str] = {}
+    for img_path in sorted(real_dir.glob("*.*")):
+        if img_path.suffix.lower() not in [".jpg", ".jpeg", ".png"]:
+            continue
+        fname = img_path.name
+        if fname in meta_info:
+            row = meta_info[fname]
+            est_min = row.get("est_level_min", "")
+            est_max = row.get("est_level_max", "")
+            est_str = f"Cấp {est_min}" if (not est_max or est_min == est_max) else f"Cấp {est_min}-{est_max}"
+            notes = row.get("notes", "")
+            if len(notes) > 42:
+                notes = notes[:40] + "..."
+            label = f"{fname} — [{est_str}] {notes}"
+        else:
+            label = fname
+        options[label] = str(img_path)
+    return options
+
+
+def get_benchmark_dataset_options(project_root: Path) -> Dict[str, str]:
+    """Lấy danh sách ảnh chuẩn đối sánh Benchmark từ data/raw/."""
+    raw_dir = project_root / "data" / "raw"
+    options: Dict[str, str] = {}
+    for img_path in sorted(raw_dir.glob("*.*")):
+        if img_path.is_file() and img_path.suffix.lower() in [".jpg", ".jpeg", ".png"]:
+            fname = img_path.name
+            if fname.startswith("healthy"):
+                lbl = f"{fname} — Lá khỏe mạnh (Cấp 0)"
+            elif fname.startswith("mild"):
+                lbl = f"{fname} — Bệnh nhẹ (Cấp 1: 1–5%)"
+            elif fname.startswith("moderate"):
+                lbl = f"{fname} — Bệnh vừa (Cấp 2: 6–20%)"
+            elif fname.startswith("severe"):
+                lbl = f"{fname} — Bệnh nặng (Cấp 3: 21–50%)"
+            elif fname.startswith("critical"):
+                lbl = f"{fname} — Bệnh rất nặng (Cấp 4: >50%)"
+            elif fname.startswith("glare"):
+                lbl = f"{fname} — Thử thách: Nhiễu lóa sáng phản quang"
+            elif fname.startswith("shadow"):
+                lbl = f"{fname} — Thử thách: Nhiễu bóng râm thực địa"
+            else:
+                lbl = fname
+            options[lbl] = str(img_path)
+    return options
+
+
+def get_csv_dataset_options(project_root: Path) -> Dict[str, str]:
+    """Lấy danh sách file ma trận điểm ảnh số CSV từ data/raw/csv/."""
+    csv_dir = project_root / "data" / "raw" / "csv"
+    options: Dict[str, str] = {}
+    for f in sorted(csv_dir.glob("*.csv")):
+        fname = f.name
+        if "gray" in fname:
+            desc = "Ma trận mức xám Grayscale (Q4)"
+        elif "leafmask" in fname:
+            desc = "Ma trận nhị phân lá Ground-Truth"
+        else:
+            desc = "Ma trận điểm ảnh CSV"
+        options[f"{fname} — {desc}"] = str(f)
+    return options
+
+
 # =============================================================================
 # THANH SIDEBAR (LEFT CONTROL PANEL)
 # =============================================================================
@@ -791,18 +876,59 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-    # Khu vực 1 — Nguồn dữ liệu đầu vào
+# Khu vực 1 — Nguồn dữ liệu đầu vào
     st.markdown('<div class="sb-label">1. Nguồn dữ liệu đầu vào</div>', unsafe_allow_html=True)
     input_choice = st.radio(
         "Nguồn dữ liệu:",
-        ["Dùng ảnh mẫu thử nghiệm", "Tải file từ máy (.JPG/.PNG/.CSV)"],
+        [
+            "📂 Bộ dữ liệu dự án (data/)",
+            "📤 Tải file từ máy (.JPG/.PNG/.CSV)",
+            "🎨 Dùng ảnh mẫu thử nghiệm (Synthetic)",
+        ],
         label_visibility="collapsed",
     )
 
     raw_input_source: Any = None
     source_name = "sample_leaf.png"
 
-    if input_choice == "Tải file từ máy (.JPG/.PNG/.CSV)":
+    if input_choice.startswith("📂 Bộ dữ liệu dự án"):
+        dataset_category = st.selectbox(
+            "Chọn nhóm dữ liệu dự án:",
+            [
+                "🍃 Ảnh lá thật thực tế (data/raw/real/ - 17 ảnh)",
+                "🧪 Tập ảnh chuẩn Benchmark (data/raw/ - 30 ảnh)",
+                "🔢 Ma trận điểm ảnh số (data/raw/csv/ - 10 file)",
+            ],
+        )
+        if dataset_category.startswith("🍃 Ảnh lá thật"):
+            real_opts = get_real_dataset_options(PROJECT_ROOT)
+            if real_opts:
+                chosen_lbl = st.selectbox("Chọn ảnh lá thật thực tế:", list(real_opts.keys()))
+                raw_input_source = real_opts[chosen_lbl]
+                source_name = Path(raw_input_source).name
+                st.caption(f"📍 File: `{source_name}` (Tập dữ liệu kiểm nghiệm thực tế)")
+            else:
+                st.warning("Không tìm thấy file ảnh trong data/raw/real/")
+        elif dataset_category.startswith("🧪 Tập ảnh chuẩn"):
+            bm_opts = get_benchmark_dataset_options(PROJECT_ROOT)
+            if bm_opts:
+                chosen_lbl = st.selectbox("Chọn ảnh benchmark:", list(bm_opts.keys()))
+                raw_input_source = bm_opts[chosen_lbl]
+                source_name = Path(raw_input_source).name
+                st.caption(f"📍 File: `{source_name}` (Ảnh chuẩn đối sánh)")
+            else:
+                st.warning("Không tìm thấy file ảnh trong data/raw/")
+        else:
+            csv_opts = get_csv_dataset_options(PROJECT_ROOT)
+            if csv_opts:
+                chosen_lbl = st.selectbox("Chọn ma trận CSV:", list(csv_opts.keys()))
+                raw_input_source = csv_opts[chosen_lbl]
+                source_name = Path(raw_input_source).name
+                st.caption(f"📍 File: `{source_name}` (Ma trận điểm ảnh số)")
+            else:
+                st.warning("Không tìm thấy file CSV trong data/raw/csv/")
+
+    elif input_choice.startswith("📤 Tải file từ máy"):
         uploaded_file = st.file_uploader(
             "Kéo thả hoặc chọn ảnh / ma trận CSV",
             type=["png", "jpg", "jpeg", "csv"],

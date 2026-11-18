@@ -34,8 +34,10 @@ ROOT = Path(__file__).resolve().parents[1]
 REAL_DIR = ROOT / "data" / "raw" / "real"
 OUT_DEFAULT = ROOT / "experiments" / "results" / "real"
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-GROUP_VI = {"healthy": "Lá khỏe (tự chụp)", "diseased": "Lá bệnh", "hard": "Ca khó",
-            "limitation": "Giới hạn phương pháp", "": "Chưa khai báo"}
+GROUP_VI = {"healthy": "Lá khỏe", "lesion": "Vết bệnh nâu/vàng rõ", "yellowing": "Vàng úa lan rộng",
+            "mottle_shadow": "Khảm/úa loang (+ bóng đổ)", "failure": "Failure case",
+            "diseased": "Lá bệnh", "hard": "Ca khó", "limitation": "Giới hạn phương pháp", "": "Chưa khai báo"}
+GROUP_ORDER = ["healthy", "lesion", "yellowing", "mottle_shadow", "diseased", "hard", "limitation", "failure", ""]
 
 
 def read_metadata(real_dir: Path) -> Dict[str, Dict]:
@@ -144,7 +146,7 @@ def write_summary(rows: List[Dict], path: Path):
              "Tự sinh bởi `python -m experiments.run_real_images`. Ảnh thật không có Ground Truth: "
              "cột *ước lượng* là đánh giá bằng mắt, chỉ mang tính tham khảo.", "",
              "| Nhóm | Số ảnh | Khớp | Thấp hơn | Cao hơn |", "|---|---|---|---|---|"]
-    for g in ("healthy", "diseased", "hard", "limitation", ""):
+    for g in GROUP_ORDER:
         rs = [r for r in rows if r["group"] == g]
         if not rs:
             continue

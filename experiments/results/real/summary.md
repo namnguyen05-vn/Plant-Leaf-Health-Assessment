@@ -4,27 +4,33 @@ Tự sinh bởi `python -m experiments.run_real_images`. Ảnh thật không có
 
 | Nhóm | Số ảnh | Khớp | Thấp hơn | Cao hơn |
 |---|---|---|---|---|
-| Lá khỏe (tự chụp) | 2 | 2 | 0 | 0 |
-| Lá bệnh | 8 | 7 | 1 | 0 |
-| Ca khó | 4 | 2 | 2 | 0 |
-| Giới hạn phương pháp | 3 | 1 | 1 | 0 |
+| Lá khỏe | 3 | 2 | 0 | 1 |
+| Vết bệnh nâu/vàng rõ | 6 | 5 | 1 | 0 |
+| Vàng úa lan rộng | 2 | 0 | 2 | 0 |
+| Khảm/úa loang (+ bóng đổ) | 7 | 5 | 2 | 0 |
+| Failure case | 4 | 1 | 3 | 0 |
 
 | Ảnh | Nhóm | Ước lượng (cấp / R%) | Dự đoán (cấp / R%) | Kết quả | Lá/khung |
 |---|---|---|---|---|---|
-| cab_lv0_01_selfshot.jpg | healthy | 0 / 0-0 | 0 / 0.0 | khớp | 0.336 |
-| cab_lv0_02_selfshot.jpg | healthy | 0 / 0-1 | 0 / 0.97 | khớp | 0.366 |
-| cab_lv1_01_bugwood1572855.jpg | diseased | 1 / 5-8 | 1 / 3.5 | khớp | 0.586 |
-| cab_lv1_02_bugwood1572869.jpg | diseased | 1 / 3-6 | 1 / 7.93 | khớp | 0.334 |
-| cab_lv1_03_bugwood1634015.jpg | diseased | 1 / 3-5 | 1 / 6.78 | khớp | 0.185 |
-| cab_lv1_04_bugwood1572866_fullframe.jpg | diseased | 1 / 2-4 | 1 / 3.84 | khớp | 0.046 |
-| cab_lv1_05_bugwood1572864_fullframe.jpg | diseased | 1-2 / 8-12 | 1 / 3.15 | khớp | 0.492 |
-| cab_lv2_01_internet_blackbg.jpg | diseased | 1-2 / 8-12 | 1 / 6.82 | khớp | 0.721 |
-| cab_lv2_02_bugwood5403519_soil_shadow.jpg | hard | 2 / 10-15 | 2 / 12.95 | khớp | 0.66 |
-| cab_lv2_03_internet_field.jpg | hard | 2 / 15-20 | 2 / 16.68 | khớp | 0.382 |
-| cab_lv3_01_bugwood1534036.jpg | diseased | 2-3 / 25-35 | 2 / 20.43 | khớp | 0.667 |
-| cab_lv3_02_internet_blackbg.jpg | diseased | 2-3 / 20-30 | 1 / 6.81 | thấp hơn | 0.672 |
-| cab_lv3_03_internet_wood.jpg | hard | 3 / 40-50 | 1 / 4.32 | thấp hơn | 0.42 |
-| cab_lv4_01_internet_field.jpg | hard | 3-4 / 50-70 | 0 / 0.0 | thấp hơn | 0.763 |
-| lim_01_bugwood5389805_purple_spots.jpg | limitation | 2 / 15-25 | 1 / 1.83 | thấp hơn | 0.595 |
-| lim_02_bugwood1563086_cucumber_white_spots.jpg | limitation | 1 / 2-3 | 1 / 2.56 | khớp | 0.357 |
-| lim_03_internet_cucumber_mosaic.jpg | limitation | ? / ? | 0 / 0.15 | n/a | 0.558 |
+| fail_01_wood_deadtissue.jpg | failure | 3 / 40-50 | 1 / 4.32 | thấp hơn | 0.42 |
+| fail_02_field_yellowed_lv4.jpg | failure | 3-4 / 50-70 | 0 / 0.0 | thấp hơn | 0.763 |
+| fail_03_bugwood5389805_purple_spots.jpg | failure | 2 / 15-25 | 1 / 1.83 | thấp hơn | 0.595 |
+| fail_04_bugwood1572866_fullframe.jpg | failure | 1 / 2-4 | 1 / 3.84 | khớp | 0.046 |
+| tom_healthy_01.png | healthy | 0 / 0-1 | 1 / 1.68 | cao hơn | 0.424 |
+| tom_healthy_02.png | healthy | 0 / 0-0 | 0 / 0.09 | khớp | 0.533 |
+| tom_healthy_03.png | healthy | 0 / 0-1 | 0 / 0.07 | khớp | 0.439 |
+| tom_lesion_01.png | lesion | 0-1 / 0.5-3 | 0 / 0.13 | khớp | 0.472 |
+| tom_lesion_02.png | lesion | 1 / 3-8 | 0 / 0.29 | thấp hơn | 0.508 |
+| tom_lesion_03.png | lesion | 1-2 / 8-15 | 1 / 5.8 | khớp | 0.52 |
+| tom_lesion_04.png | lesion | 1-2 / 8-15 | 1 / 5.67 | khớp | 0.501 |
+| tom_lesion_05.png | lesion | 1-2 / 8-15 | 1 / 6.28 | khớp | 0.481 |
+| tom_lesion_06.png | lesion | 2-3 / 25-40 | 2 / 23.73 | khớp | 0.379 |
+| tom_mottle_shadow_01.png | mottle_shadow | 1-3 / 10-40 | 1 / 3.35 | khớp | 0.26 |
+| tom_mottle_shadow_02.png | mottle_shadow | 1-3 / 10-40 | 1 / 1.43 | khớp | 0.292 |
+| tom_mottle_shadow_03.png | mottle_shadow | 1-3 / 10-40 | 1 / 3.8 | khớp | 0.309 |
+| tom_mottle_shadow_04.png | mottle_shadow | 1-3 / 10-40 | 0 / 0.78 | thấp hơn | 0.304 |
+| tom_mottle_shadow_05.png | mottle_shadow | 1-3 / 10-40 | 1 / 1.33 | khớp | 0.31 |
+| tom_mottle_shadow_06.png | mottle_shadow | 1-3 / 10-40 | 1 / 1.76 | khớp | 0.288 |
+| tom_mottle_shadow_07.png | mottle_shadow | 1-3 / 10-40 | 0 / 0.22 | thấp hơn | 0.198 |
+| tom_yellow_01.png | yellowing | 2-3 / 20-35 | 1 / 4.0 | thấp hơn | 0.427 |
+| tom_yellow_02.png | yellowing | 2-3 / 20-35 | 1 / 3.47 | thấp hơn | 0.34 |

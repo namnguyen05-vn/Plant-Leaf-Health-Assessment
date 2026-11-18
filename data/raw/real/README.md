@@ -1,28 +1,23 @@
 # Ảnh lá thật `data/raw/real/` (đánh giá định tính)
 
-17 ảnh, KHÔNG có mặt nạ Ground Truth. Mức bệnh trong `metadata_real.csv` được **ước lượng bằng mắt**.
+22 ảnh, KHÔNG có mặt nạ Ground Truth. Mức bệnh trong `metadata_real.csv` được **ước lượng bằng mắt**.
 
 | Nhóm (`group`) | Số ảnh | Nội dung |
 |---|---|---|
-| `healthy` | 2 | Lá bắp cải khỏe tự chụp (lá trong, màu trắng kem) trên vải đen |
-| `diseased` | 7 | Lá bắp cải/họ cải bệnh cấp 1–3, phần lớn nền đen |
-| `hard` | 4 | Ca khó: nền đất + bóng đổ, ngoài ruộng, nền gỗ, lá vàng úa cấp 4 |
-| `limitation` | 3 | Bệnh không biểu hiện bằng màu nâu/vàng (đốm tím, đốm trắng, khảm virus) |
+| `healthy` | 3 | Lá cà chua khỏe (PlantVillage) |
+| `lesion` | 6 | Lá cà chua có vết hoại tử/đốm nâu rõ, cấp 0–3 |
+| `yellowing` | 2 | Lá cà chua vàng úa lan rộng |
+| `mottle_shadow` | 7 | Lá cà chua khảm/úa loang, phần lớn có bóng đổ gắt |
+| `failure` | 4 | Failure case cho báo cáo (bắp cải, giữ từ bộ cũ): nền gỗ, lá vàng toàn phần ngoài ruộng, đốm tím, lá kín khung |
 
-Tên file: `cab_lv<cấp chính>_<stt>_<nguồn>[_ghi chú].jpg` (bắp cải), `lim_<stt>_...` (giới hạn).
-`fills_frame = yes`: lá phủ kín khung hình, nên bước tách nền không đáng tin.
-
-## Tiền xử lý đã áp dụng
-- Ảnh Bugwood: cắt dải 28 px ở đáy để bỏ ô số ảnh đen trắng (tránh bị nhận nhầm là vật thể).
-  Ảnh #1634015 cắt thêm viền khung phim.
-- Ảnh tự chụp (2576×1932): cắt quanh lá (lề 22%) để bỏ vật lạ ở góc, rồi thu nhỏ về 1280 px.
-- Ảnh lớn khác: thu nhỏ về cạnh dài tối đa 1280 px. Không chỉnh màu ảnh nào.
+Ảnh `tom_*.png` giữ nguyên định dạng PNG gốc (256×256), không chỉnh sửa.
+Ảnh `fail_*` đã cắt ô số Bugwood (28 px ở đáy) hoặc thu nhỏ về 1280 px; không chỉnh màu.
 
 ## Nguồn & giấy phép
-- `Bugwood.org #<số>`: Bugwood Network Image Archives, giấy phép Creative Commons. Dùng cho giáo dục phi
-  thương mại được, **bắt buộc ghi nguồn** (tên tác giả tra theo số ảnh tại images.bugwood.org).
-- `Internet (không rõ tác giả)`: không còn link gốc; chỉ dùng minh họa trong bài tập, không phân phối lại.
-- `Tự chụp`: ảnh của nhóm.
+- **PlantVillage** (Hughes & Salathé, 2015, arXiv:1511.08060): bản phân phối trên Mendeley Data theo
+  giấy phép CC0 1.0. Vẫn nên ghi nguồn trong báo cáo.
+- `Bugwood.org #<số>`: giấy phép Creative Commons, bắt buộc ghi nguồn Bugwood.org.
+- `Internet (không rõ tác giả)`: chỉ dùng minh họa trong bài tập.
 
 ## Chạy
 ```bash

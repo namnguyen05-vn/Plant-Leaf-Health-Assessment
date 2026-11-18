@@ -895,7 +895,7 @@ with st.sidebar:
         dataset_category = st.selectbox(
             "Chọn nhóm dữ liệu dự án:",
             [
-                "🍃 Ảnh lá thật thực tế (data/raw/real/ - 17 ảnh)",
+                "🍃 Ảnh lá thật thực tế (data/raw/real/ - 22 ảnh)",
                 "🧪 Tập ảnh chuẩn Benchmark (data/raw/ - 30 ảnh)",
                 "🔢 Ma trận điểm ảnh số (data/raw/csv/ - 10 file)",
             ],
